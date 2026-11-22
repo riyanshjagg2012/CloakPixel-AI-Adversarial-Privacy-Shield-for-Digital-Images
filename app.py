@@ -109,7 +109,7 @@ def run_haar_verification(img_rgb: np.ndarray, box: tuple[int, int, int, int] | 
 def detect_facial_landmarks(img_rgb: np.ndarray):
     """Fast 480px-scaled KeypointRCNN facial landmark detection (~0.4s on CPU)."""
     h, w, _ = img_rgb.shape
-    scale = 384.0 / max(h, w)
+    scale = 224.0 / max(h, w)
     small_rgb = cv2.resize(img_rgb, (int(w * scale), int(h * scale))) if scale < 1.0 else img_rgb
     tensor = TF.to_tensor(small_rgb).to(DEVICE)
     with torch.no_grad():
@@ -139,7 +139,7 @@ def extract_embedding(img_rgb: np.ndarray, box: tuple[int, int, int, int]) -> np
     face = img_rgb[y1:y2, x1:x2]
     if face.size == 0:
         face = img_rgb
-    t = TF.to_tensor(cv2.resize(face, (224, 224))).unsqueeze(0).to(DEVICE)
+    t = TF.to_tensor(cv2.resize(face, (128, 128))).unsqueeze(0).to(DEVICE)
     normed = TF.normalize(t, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     with torch.no_grad():
         emb = FEATURE_EXTRACTOR(normed).flatten().cpu().numpy()
@@ -151,7 +151,7 @@ def extract_embedding(img_rgb: np.ndarray, box: tuple[int, int, int, int]) -> np
 # 4. PYTORCH ITERATIVE FGSM / PGD ADVERSARIAL CLOAKING
 # ---------------------------------------------------------
 def apply_cloak(img_rgb: np.ndarray, epsilon: float = 0.035) -> tuple[np.ndarray, tuple, list]:
-    """Attacks the exact cropped biometric face region with 3-step EOT-PGD."""
+    """Attacks the exact cropped biometric face region with fast 2-step EOT-PGD."""
     h, w, _ = img_rgb.shape
     box, landmarks = detect_facial_landmarks(img_rgb)
     x1, y1, x2, y2 = box
@@ -169,33 +169,30 @@ def apply_cloak(img_rgb: np.ndarray, epsilon: float = 0.035) -> tuple[np.ndarray
 
     with torch.no_grad():
         face_crop = orig_t[:, :, y1:y2, x1:x2]
-        c_res = nn.functional.interpolate(face_crop, size=(224, 224), mode="bilinear", align_corners=False)
+        c_res = nn.functional.interpolate(face_crop, size=(128, 128), mode="bilinear", align_corners=False)
         c_norm = TF.normalize(c_res, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         orig_feat = FEATURE_EXTRACTOR(c_norm).flatten(1)
         orig_feat = nn.functional.normalize(orig_feat - orig_feat.mean(dim=1, keepdim=True), dim=1)
 
     adv_t = orig_t.clone().detach()
-    steps = 3
-    alpha = (epsilon / steps) * 2.8
+    steps = 2
+    alpha = (epsilon / steps) * 3.2
     for _ in range(steps):
         adv_t.requires_grad_(True)
         adv_crop = adv_t[:, :, y1:y2, x1:x2]
         smoothed = TF.gaussian_blur(adv_crop, kernel_size=[3, 3], sigma=[0.5, 0.5])
 
-        # EOT: resize jitter approximates social-media resizing and compression artifacts.
+        # Fast EOT: a fixed resize round trip approximates social-media scaling.
         crop_h, crop_w = smoothed.shape[-2], smoothed.shape[-1]
-        scale_factor = float(np.random.choice([0.90, 0.95, 1.05, 1.10]))
-        jitter_h = max(16, int(crop_h * scale_factor))
-        jitter_w = max(16, int(crop_w * scale_factor))
         transformed = nn.functional.interpolate(
-            smoothed, size=(jitter_h, jitter_w), mode="bilinear", align_corners=False
+            smoothed, size=(max(16, crop_h // 2), max(16, crop_w // 2)),
+            mode="bilinear", align_corners=False,
         )
         transformed = nn.functional.interpolate(
             transformed, size=(crop_h, crop_w), mode="bilinear", align_corners=False
         )
-        transformed = transformed + torch.randn_like(transformed) * epsilon * 0.015
 
-        res = nn.functional.interpolate(transformed, size=(224, 224), mode="bilinear", align_corners=False)
+        res = nn.functional.interpolate(transformed, size=(128, 128), mode="bilinear", align_corners=False)
         normed = TF.normalize(res, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         adv_feat = FEATURE_EXTRACTOR(normed).flatten(1)
         adv_feat = nn.functional.normalize(adv_feat - adv_feat.mean(dim=1, keepdim=True), dim=1)
