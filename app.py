@@ -251,7 +251,7 @@ def generate_sample_portrait(name: str) -> str:
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><title>CloakPixel AI</title>
+<meta charset="UTF-8"><title>CloakPixel AI — Adversarial Privacy Shield</title>
 <style>
   * { box-sizing: border-box; }
   :root { color-scheme: dark; }
@@ -411,6 +411,30 @@ HTML_PAGE = """<!DOCTYPE html>
   .verify-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   .verify-grid img { display:block; width:100%; height:300px; object-fit:contain; border:1px solid #16324f; border-radius:8px; background:#040811; }
   .close-btn { width:auto; margin:0; padding:7px 11px; }
+  /* CloakPixel presentation stage overrides */
+  body { background:radial-gradient(circle at 50% 14%,#0c3559 0%,#061326 42%,#030812 100%) !important; padding:0 24px 28px !important; }
+  body::before { display:none; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid rgba(56,189,248,0.15); }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px; color:#f0f9ff; }
+  .brand-icon { width:28px; height:28px; border-radius:50%; border:2px solid #38bdf8; display:flex; align-items:center; justify-content:center; box-shadow:0 0 12px rgba(56,189,248,0.5); color:#38bdf8; font-size:13px; }
+  .nav-pills { display:flex; gap:10px; align-items:center; }
+  .pill { background:rgba(12,36,60,0.75); border:1px solid rgba(56,189,248,0.35); color:#7dd3fc; padding:5px 12px; border-radius:999px; font-size:11.5px; font-weight:600; }
+  .pill-live { border-color:#34d399; color:#6ee7b7; }
+  .hero { text-align:center; padding:22px 10px 18px; max-width:820px; margin:0 auto; }
+  .eyebrow { color:#38bdf8; font-size:11.5px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin-bottom:8px; }
+  .hero-title { font-size:38px; font-weight:800; margin:0; color:#fff; display:inline-flex; align-items:center; gap:12px; text-shadow:0 0 28px rgba(56,189,248,0.35); }
+  .ver-badge { font-size:14px; font-weight:700; color:#38bdf8; background:rgba(2,132,199,0.2); border:1px solid #0284c7; padding:3px 10px; border-radius:8px; }
+  .hero-desc { color:#94a3b8; font-size:13.5px; line-height:1.5; margin:10px auto 16px; max-width:650px; }
+  .shields { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; max-width:860px; margin:0 auto 22px; }
+  .shield-card { background:rgba(8,22,40,0.78); border:1px solid rgba(56,189,248,0.28); border-radius:12px 12px 22px 22px; padding:9px 6px; text-align:center; box-shadow:inset 0 0 14px rgba(56,189,248,0.08); }
+  .sh-top { font-size:9px; color:#7dd3fc; letter-spacing:1px; text-transform:uppercase; }
+  .sh-val { font-size:14px; font-weight:800; color:#fff; margin:2px 0; }
+  .sh-bot { font-size:9.5px; color:#34d399; font-weight:600; text-transform:uppercase; }
+  .grid { max-width:1260px; gap:18px !important; }
+  .card { background:rgba(10,22,40,0.85) !important; backdrop-filter:blur(8px); border:1px solid rgba(56,189,248,0.22) !important; border-radius:14px !important; padding:15px !important; }
+  .card-title { font-size:13.5px; letter-spacing:0.3px; text-transform:none; }
+  .img-box { height:195px; border:1px dashed rgba(56,189,248,0.25); border-radius:10px; }
+  .dl-btn { display:none; text-align:center; background:rgba(2,132,199,0.2); border:1px solid #38bdf8; color:#7dd3fc; padding:8px; border-radius:8px; margin-top:8px; font-size:12.5px; font-weight:600; text-decoration:none; }
   @keyframes livePulse { 50% { opacity:0.45; box-shadow:0 0 4px #34d399; } }
   @keyframes cardEnter { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
   @keyframes scanLine { 0%,100% { top:-2px; } 50% { top:100%; } }
@@ -420,12 +444,28 @@ HTML_PAGE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-  <div class="header">
-    <div>
-      <h1>CloakPixel AI: Adversarial Privacy Shield</h1>
-      <div class="sub">Protecting digital identity from unauthorized scraping, biometric tracking, and non-consensual deepfakes — facial landmarks, adversarial pixels, and EXIF defense</div>
+  <div class="topbar">
+    <div class="brand"><div class="brand-icon">◈</div> CloakPixel AI</div>
+    <div class="nav-pills">
+      <span class="pill">PyTorch KeypointRCNN</span>
+      <span class="pill">EOT-PGD Perturbation</span>
+      <span class="pill pill-live">● 100% On-Device Offline</span>
     </div>
-    <div class="badge">100% On-Device • Zero Cloud</div>
+  </div>
+
+  <div class="hero">
+    <div class="eyebrow">Threat Prevention • Biometric Adversarial Defense</div>
+    <h1 class="hero-title">CloakPixel AI <span class="ver-badge">v2.0</span></h1>
+    <p class="hero-desc">Protect personal photos from unauthorized facial recognition scraping and deepfake manipulation with invisible, JPEG-resistant pixel perturbations and zero-trace EXIF metadata stripping.</p>
+  </div>
+
+  <div class="shields">
+    <div class="shield-card"><div class="sh-top">Privacy</div><div class="sh-val">100%</div><div class="sh-bot">On-Device</div></div>
+    <div class="shield-card"><div class="sh-top">Landmarks</div><div class="sh-val" id="shKp">5-Point</div><div class="sh-bot">KeypointRCNN</div></div>
+    <div class="shield-card"><div class="sh-top">Attack</div><div class="sh-val">EOT-PGD</div><div class="sh-bot">JPEG-Safe</div></div>
+    <div class="shield-card"><div class="sh-top">Scraper Match</div><div class="sh-val" id="shMatch">0.0%</div><div class="sh-bot">Defeated</div></div>
+    <div class="shield-card"><div class="sh-top">Fidelity</div><div class="sh-val" id="shSsim">&gt;0.98</div><div class="sh-bot">SSIM Score</div></div>
+    <div class="shield-card"><div class="sh-top">Metadata</div><div class="sh-val">0 Bytes</div><div class="sh-bot">EXIF Wiped</div></div>
   </div>
 
   <div class="grid">
@@ -438,10 +478,10 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
       <input type="file" id="fileIn" accept="image/*">
       <div class="img-box"><span class="placeholder" id="ph1">No photo selected</span><img id="origImg"></div>
-      <label>Perturbation Budget (Epsilon): <b id="epsVal" style="color:#38bdf8">0.035</b></label>
-      <input type="range" id="eps" min="0.01" max="0.06" step="0.005" value="0.035" style="width:100%;accent-color:#06b6d4" oninput="epsVal.innerText=this.value">
+      <label>Perturbation Budget (Epsilon): <b id="epsVal" style="color:#38bdf8">0.025</b></label>
+      <input type="range" id="eps" min="0.01" max="0.06" step="0.005" value="0.025" style="width:100%;accent-color:#06b6d4" oninput="epsVal.innerText=this.value">
       <label><input type="checkbox" id="jpegChk" checked style="accent-color:#06b6d4"> Simulate Social Media JPEG-75 Compression</label>
-      <button onclick="runCloak()">Activate Pixel Shield</button>
+      <button onclick="runCloak()">Protect Your Portrait Now</button>
     </div>
 
     <div class="card">
@@ -517,6 +557,9 @@ async function runCloak() {
   heatImg.src = d.heatmap;  ph3.style.display = "none";
   dlLink.href = d.cloaked;
   dlLink.style.display = "block";
+  shKp.innerText = d.landmarks + "-Point";
+  shMatch.innerText = d.cloak_match + "%";
+  shSsim.innerText = d.ssim;
   verificationData = d.detector;
   exifData = d.exif_diff;
   if (verificationData) {
@@ -668,7 +711,7 @@ if __name__ == "__main__":
     print("Warming PyTorch models...")
     warmup_models()
     print("PyTorch warmup complete")
-    server = HTTPServer(("127.0.0.1", 7861), Handler)
-    print("CloakPixel AI running locally at http://127.0.0.1:7861 (Press Ctrl+C to stop)")
-    threading.Timer(0.8, lambda: webbrowser.open("http://127.0.0.1:7861")).start()
+    server = HTTPServer(("127.0.0.1", 7862), Handler)
+    print("CloakPixel AI running locally at http://127.0.0.1:7862 (Press Ctrl+C to stop)")
+    threading.Timer(0.8, lambda: webbrowser.open("http://127.0.0.1:7862")).start()
     server.serve_forever()
