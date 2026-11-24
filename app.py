@@ -7,7 +7,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import cv2
 import numpy as np
-from PIL import Image, ExifTags, ImageDraw
+from PIL import Image, ImageDraw, ImageOps, ExifTags
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -30,6 +30,10 @@ _net = models.resnet18(weights=models.ResNet18_Weights.DEFAULT).to(DEVICE)
 _net.eval()
 FEATURE_EXTRACTOR = nn.Sequential(*list(_net.children())[:-1]).to(DEVICE)
 FEATURE_EXTRACTOR.eval()
+
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_IMAGE_BYTES = 24 * 1024 * 1024
+MAX_IMAGE_PIXELS = 25_000_000
 
 FACE_CASCADE = None
 if hasattr(cv2, "CascadeClassifier"):
@@ -107,12 +111,12 @@ def run_haar_verification(img_rgb: np.ndarray, box: tuple[int, int, int, int] | 
 # 3. PYTORCH FACIAL LANDMARK DETECTION & FACE CROP
 # ---------------------------------------------------------
 def detect_facial_landmarks(img_rgb: np.ndarray):
-    """Fast 480px-scaled KeypointRCNN facial landmark detection (~0.4s on CPU)."""
+    """Detect facial landmarks on a scaled image and map points to source pixels."""
     h, w, _ = img_rgb.shape
-    scale = 224.0 / max(h, w)
+    scale = 320.0 / max(h, w)
     small_rgb = cv2.resize(img_rgb, (int(w * scale), int(h * scale))) if scale < 1.0 else img_rgb
     tensor = TF.to_tensor(small_rgb).to(DEVICE)
-    with torch.no_grad():
+    with torch.inference_mode():
         preds = LANDMARK_MODEL([tensor])[0]
 
     for idx, score in enumerate(preds["scores"]):
@@ -151,45 +155,46 @@ def extract_embedding(img_rgb: np.ndarray, box: tuple[int, int, int, int]) -> np
 # 4. PYTORCH ITERATIVE FGSM / PGD ADVERSARIAL CLOAKING
 # ---------------------------------------------------------
 def apply_cloak(img_rgb: np.ndarray, epsilon: float = 0.035) -> tuple[np.ndarray, tuple, list]:
-    """Attacks the exact cropped biometric face region with fast 2-step EOT-PGD."""
-    h, w, _ = img_rgb.shape
+    """Optimize the face crop with 8-step EOT-PGD and paste it into the source image."""
     box, landmarks = detect_facial_landmarks(img_rgb)
     x1, y1, x2, y2 = box
+    face_rgb = img_rgb[y1:y2, x1:x2]
+    if face_rgb.size == 0:
+        return img_rgb.copy(), box, landmarks
 
-    mask = np.zeros((h, w), dtype=np.float32)
-    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    rx, ry = max(10, (x2 - x1) // 2), max(10, (y2 - y1) // 2)
+    crop_h, crop_w = face_rgb.shape[:2]
+    mask = np.zeros((crop_h, crop_w), dtype=np.float32)
+    cx, cy = crop_w // 2, crop_h // 2
+    rx, ry = max(10, crop_w // 2), max(10, crop_h // 2)
     cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 0.85, -1)
     for lx, ly in landmarks:
-        cv2.circle(mask, (lx, ly), max(12, rx // 4), 1.0, -1)
+        cv2.circle(mask, (lx - x1, ly - y1), max(12, rx // 4), 1.0, -1)
     mask = cv2.GaussianBlur(mask, (25, 25), 0)
 
-    orig_t = TF.to_tensor(img_rgb).unsqueeze(0).to(DEVICE)
+    orig_t = TF.to_tensor(face_rgb).unsqueeze(0).to(DEVICE)
     mask_t = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
-        face_crop = orig_t[:, :, y1:y2, x1:x2]
-        c_res = nn.functional.interpolate(face_crop, size=(128, 128), mode="bilinear", align_corners=False)
+        c_res = nn.functional.interpolate(orig_t, size=(128, 128), mode="bilinear", align_corners=False)
         c_norm = TF.normalize(c_res, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         orig_feat = FEATURE_EXTRACTOR(c_norm).flatten(1)
         orig_feat = nn.functional.normalize(orig_feat - orig_feat.mean(dim=1, keepdim=True), dim=1)
 
     adv_t = orig_t.clone().detach()
-    steps = 2
-    alpha = (epsilon / steps) * 3.2
+    steps = 8
+    alpha = (epsilon / steps) * 1.5
     for _ in range(steps):
         adv_t.requires_grad_(True)
-        adv_crop = adv_t[:, :, y1:y2, x1:x2]
-        smoothed = TF.gaussian_blur(adv_crop, kernel_size=[3, 3], sigma=[0.5, 0.5])
+        smoothed = TF.gaussian_blur(adv_t, kernel_size=[3, 3], sigma=[0.5, 0.5])
 
         # Fast EOT: a fixed resize round trip approximates social-media scaling.
-        crop_h, crop_w = smoothed.shape[-2], smoothed.shape[-1]
+        tensor_h, tensor_w = smoothed.shape[-2], smoothed.shape[-1]
         transformed = nn.functional.interpolate(
-            smoothed, size=(max(16, crop_h // 2), max(16, crop_w // 2)),
+            smoothed, size=(max(16, tensor_h // 2), max(16, tensor_w // 2)),
             mode="bilinear", align_corners=False,
         )
         transformed = nn.functional.interpolate(
-            transformed, size=(crop_h, crop_w), mode="bilinear", align_corners=False
+          transformed, size=(tensor_h, tensor_w), mode="bilinear", align_corners=False
         )
 
         res = nn.functional.interpolate(transformed, size=(128, 128), mode="bilinear", align_corners=False)
@@ -204,7 +209,8 @@ def apply_cloak(img_rgb: np.ndarray, epsilon: float = 0.035) -> tuple[np.ndarray
             adv_t = adv_t - alpha * adv_t.grad.sign() * mask_t
             adv_t = torch.clamp(orig_t + torch.clamp(adv_t - orig_t, -epsilon, epsilon), 0.0, 1.0).detach()
 
-    cloaked = (adv_t.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    cloaked = img_rgb.copy()
+    cloaked[y1:y2, x1:x2] = (adv_t.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
     return cloaked, box, landmarks
 
 
@@ -246,6 +252,43 @@ def generate_sample_portrait(name: str) -> str:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def parse_cloak_request(body: bytes) -> tuple[Image.Image, float, bool]:
+    payload = json.loads(body)
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object.")
+
+    data_url = payload.get("image")
+    if not isinstance(data_url, str):
+        raise ValueError("Include an image as a base64 data URL.")
+    header, separator, encoded_image = data_url.partition(",")
+    if not separator or not header.startswith("data:image/") or ";base64" not in header:
+        raise ValueError("Image must use a base64-encoded image data URL.")
+
+    image_bytes = base64.b64decode(encoded_image, validate=True)
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise ValueError("Image is too large. Maximum upload size is 24 MB.")
+
+    image = Image.open(io.BytesIO(image_bytes))
+    width, height = image.size
+    if width < 64 or height < 64:
+        raise ValueError("Image must be at least 64 by 64 pixels.")
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError("Image dimensions exceed the 25-megapixel limit.")
+    image.load()
+
+    epsilon = payload.get("epsilon", 0.025)
+    if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)) or not np.isfinite(epsilon):
+        raise ValueError("Perturbation strength must be a finite number.")
+    if not 0.01 <= epsilon <= 0.06:
+        raise ValueError("Perturbation strength must be between 0.01 and 0.06.")
+
+    jpeg = payload.get("jpeg", True)
+    if not isinstance(jpeg, bool):
+        raise ValueError("JPEG stress-test setting must be true or false.")
+
+    return image, float(epsilon), jpeg
 
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -547,12 +590,28 @@ fileIn.onchange = e => {
 async function runCloak() {
   if (!imgDataUrl) return alert("Please upload a portrait photo first!");
   auditBox.innerHTML = "Detecting facial landmarks & running adversarial optimization...";
-  const res = await fetch("/cloak", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ image: imgDataUrl, epsilon: parseFloat(eps.value), jpeg: jpegChk.checked })
-  });
-  const d = await res.json();
+  let res;
+  try {
+    res = await fetch("/cloak", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ image: imgDataUrl, epsilon: parseFloat(eps.value), jpeg: jpegChk.checked })
+    });
+  } catch (error) {
+    auditBox.textContent = "Could not reach the local shield server. Check that app.py is running and retry.";
+    return;
+  }
+  let d;
+  try {
+    d = await res.json();
+  } catch (error) {
+    auditBox.textContent = "The local server returned an unreadable response. Retry the request.";
+    return;
+  }
+  if (!res.ok) {
+    auditBox.textContent = d.error || "The image could not be processed. Try another image.";
+    return;
+  }
   cloakImg.src = d.cloaked; ph2.style.display = "none";
   heatImg.src = d.heatmap;  ph3.style.display = "none";
   dlLink.href = d.cloaked;
@@ -607,6 +666,14 @@ function openExif() {
 
 
 class Handler(BaseHTTPRequestHandler):
+    def send_json(self, status: int, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path.startswith("/sample/"):
             name = self.path.removeprefix("/sample/")
@@ -626,73 +693,89 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/cloak":
-            self.send_response(404)
-            self.end_headers()
+            self.send_json(404, {"error": "Endpoint not found."})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json(400, {"error": "Invalid Content-Length header."})
+            return
+        if length <= 0:
+            self.send_json(400, {"error": "Request body is empty."})
+            return
+        if length > MAX_REQUEST_BYTES:
+            self.send_json(413, {"error": "Request is too large. Maximum request size is 32 MB."})
+            return
+
+        body = self.rfile.read(length)
+        if len(body) != length:
+            self.send_json(400, {"error": "Request body was incomplete."})
+            return
+        try:
+            pil_img, epsilon, test_jpeg = parse_cloak_request(body)
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            self.send_json(400, {"error": str(exc) or "Invalid image request."})
             return
 
         t0 = time.perf_counter()
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length))
-        raw_bytes = base64.b64decode(payload["image"].split(",", 1)[1])
-        pil_img = Image.open(io.BytesIO(raw_bytes))
-        exif_status = inspect_exif(pil_img)
-        exif_diff = get_exif_diff(pil_img)
-        orig_rgb = np.array(pil_img.convert("RGB"))
-        cloaked_rgb, box, landmarks = apply_cloak(orig_rgb, epsilon=payload["epsilon"])
-        audited_rgb = jpeg_roundtrip(cloaked_rgb, 75) if payload["jpeg"] else cloaked_rgb
-        ssim_val = compute_ssim(orig_rgb, cloaked_rgb)
-        diff = np.abs(cloaked_rgb.astype(np.float32) - orig_rgb.astype(np.float32))
-        gray_amp = cv2.cvtColor(np.clip(diff * 20.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-        heatmap = np.zeros_like(orig_rgb)
-        heatmap[:, :, 0] = (gray_amp * 0.1).astype(np.uint8)
-        heatmap[:, :, 1] = gray_amp
-        heatmap[:, :, 2] = gray_amp
-        for lx, ly in landmarks:
-            cv2.circle(heatmap, (lx, ly), 4, (255, 255, 255), -1)
-            cv2.circle(heatmap, (lx, ly), 9, (56, 189, 248), 1)
-            cv2.circle(heatmap, (lx, ly), 12, (56, 189, 248), 1)
-            cv2.line(heatmap, (lx - 15, ly), (lx - 7, ly), (56, 189, 248), 1)
-            cv2.line(heatmap, (lx + 7, ly), (lx + 15, ly), (56, 189, 248), 1)
-            cv2.line(heatmap, (lx, ly - 15), (lx, ly - 7), (56, 189, 248), 1)
-            cv2.line(heatmap, (lx, ly + 7), (lx, ly + 15), (56, 189, 248), 1)
+        try:
+            exif_status = inspect_exif(pil_img)
+            exif_diff = get_exif_diff(pil_img)
+            orig_rgb = np.array(ImageOps.exif_transpose(pil_img).convert("RGB"))
+            cloaked_rgb, box, landmarks = apply_cloak(orig_rgb, epsilon=epsilon)
+            audited_rgb = jpeg_roundtrip(cloaked_rgb, 75) if test_jpeg else cloaked_rgb
+            ssim_val = compute_ssim(orig_rgb, cloaked_rgb)
+            diff = np.abs(cloaked_rgb.astype(np.float32) - orig_rgb.astype(np.float32))
+            gray_amp = cv2.cvtColor(np.clip(diff * 20.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            heatmap = np.zeros_like(orig_rgb)
+            heatmap[:, :, 0] = (gray_amp * 0.1).astype(np.uint8)
+            heatmap[:, :, 1] = gray_amp
+            heatmap[:, :, 2] = gray_amp
+            for lx, ly in landmarks:
+                cv2.circle(heatmap, (lx, ly), 4, (255, 255, 255), -1)
+                cv2.circle(heatmap, (lx, ly), 9, (56, 189, 248), 1)
+                cv2.circle(heatmap, (lx, ly), 12, (56, 189, 248), 1)
+                cv2.line(heatmap, (lx - 15, ly), (lx - 7, ly), (56, 189, 248), 1)
+                cv2.line(heatmap, (lx + 7, ly), (lx + 15, ly), (56, 189, 248), 1)
+                cv2.line(heatmap, (lx, ly - 15), (lx, ly - 7), (56, 189, 248), 1)
+                cv2.line(heatmap, (lx, ly + 7), (lx, ly + 15), (56, 189, 248), 1)
 
-        ref_emb = extract_embedding(orig_rgb, box)
-        jpeg_embedding = extract_embedding(jpeg_roundtrip(orig_rgb, 85), box)
-        cloaked_embedding = extract_embedding(audited_rgb, box)
-        cosine_similarity = float(np.clip(np.dot(ref_emb, jpeg_embedding), -1.0, 1.0))
-        cloaked_cosine_similarity = float(np.clip(np.dot(ref_emb, cloaked_embedding), -1.0, 1.0))
-        orig_match = round(max(0.0, min(100.0, cosine_similarity * 100.0)), 1)
-        cloak_match = round(max(0.0, min(100.0, cloaked_cosine_similarity * 100.0)), 1)
+            ref_emb = extract_embedding(orig_rgb, box)
+            jpeg_embedding = extract_embedding(jpeg_roundtrip(orig_rgb, 85), box)
+            cloaked_embedding = extract_embedding(audited_rgb, box)
+            cosine_similarity = float(np.clip(np.dot(ref_emb, jpeg_embedding), -1.0, 1.0))
+            cloaked_cosine_similarity = float(np.clip(np.dot(ref_emb, cloaked_embedding), -1.0, 1.0))
+            orig_match = round(max(0.0, min(100.0, cosine_similarity * 100.0)), 1)
+            cloak_match = round(max(0.0, min(100.0, cloaked_cosine_similarity * 100.0)), 1)
 
-        original_detected, original_face_count = run_haar_verification(orig_rgb, box)
-        cloaked_detected, cloaked_face_count = run_haar_verification(cloaked_rgb, box)
-        detector_data = {
-            "original": to_data_url(original_detected),
-            "cloaked": to_data_url(cloaked_detected),
-            "original_faces": original_face_count,
-            "cloaked_faces": cloaked_face_count,
-        }
-
-        out = {
-            "cloaked": to_data_url(cloaked_rgb),
-            "heatmap": to_data_url(heatmap),
-            "landmarks": len(landmarks),
-            "orig_match": orig_match,
-            "cloak_match": cloak_match,
-            "ssim": f"{ssim_val:.4f}",
-            "exif": exif_status,
-            "ms": int((time.perf_counter() - t0) * 1000),
-            "cosine_similarity": cosine_similarity,
-            "cloaked_cosine_similarity": cloaked_cosine_similarity,
-            "detector": detector_data,
-            "exif_diff": exif_diff,
-            "status": "SHIELD ACTIVE - SCRAPER DEFEATED" if cloaked_cosine_similarity < 0.30 else "INCREASE EPSILON",
-        }
-
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(out).encode("utf-8"))
+            original_detected, original_face_count = run_haar_verification(orig_rgb, box)
+            cloaked_detected, cloaked_face_count = run_haar_verification(cloaked_rgb, box)
+            detector_data = {
+                "original": to_data_url(original_detected),
+                "cloaked": to_data_url(cloaked_detected),
+                "original_faces": original_face_count,
+                "cloaked_faces": cloaked_face_count,
+            }
+            out = {
+                "cloaked": to_data_url(cloaked_rgb),
+                "heatmap": to_data_url(heatmap),
+                "landmarks": len(landmarks),
+                "orig_match": orig_match,
+                "cloak_match": cloak_match,
+                "ssim": f"{ssim_val:.4f}",
+                "exif": exif_status,
+                "ms": int((time.perf_counter() - t0) * 1000),
+                "cosine_similarity": cosine_similarity,
+                "cloaked_cosine_similarity": cloaked_cosine_similarity,
+                "detector": detector_data,
+                "exif_diff": exif_diff,
+                "status": "SHIELD ACTIVE - SCRAPER DEFEATED" if cloaked_cosine_similarity < 0.30 else "INCREASE EPSILON",
+            }
+            self.send_json(200, out)
+        except Exception as exc:
+            print(f"[CloakPixel] Image processing failed: {exc}")
+            self.send_json(500, {"error": "Image processing failed. Try another image or lower its resolution."})
 
     def log_message(self, *args):
         pass
