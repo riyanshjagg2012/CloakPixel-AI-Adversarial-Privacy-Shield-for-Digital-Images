@@ -63,6 +63,13 @@ def compute_ssim(img1: np.ndarray, img2: np.ndarray) -> float:
     return float(ssim_map.mean())
 
 
+def compute_psnr(img1: np.ndarray, img2: np.ndarray) -> float:
+    mse = float(np.mean((img1.astype(np.float64) - img2.astype(np.float64)) ** 2))
+    if mse <= 1e-12:
+        return 100.0
+    return float(10 * np.log10((255.0 ** 2) / mse))
+
+
 def inspect_exif(img_pil: Image.Image) -> str:
     exif_data = img_pil.getexif()
     found = []
@@ -300,12 +307,13 @@ HTML_PAGE = """<!DOCTYPE html>
   :root { color-scheme: dark; }
   body {
     min-height:100vh;
+    padding:0 20px 18px;
     background:
-      radial-gradient(circle at 13% 8%, rgba(14,165,233,0.14), transparent 24%),
-      radial-gradient(circle at 86% 14%, rgba(52,211,153,0.08), transparent 20%),
-      linear-gradient(rgba(56,189,248,0.025) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(56,189,248,0.025) 1px, transparent 1px),
-      #060b14;
+      radial-gradient(circle at 12% 8%, rgba(16,185,129,0.10), transparent 24%),
+      radial-gradient(circle at 88% 12%, rgba(245,158,11,0.055), transparent 18%),
+      linear-gradient(rgba(52,211,153,0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(52,211,153,0.018) 1px, transparent 1px),
+      #050807;
     background-size:auto,auto,32px 32px,32px 32px,auto;
     color:#dff5ff;
     font-family:'Segoe UI Variable','Segoe UI',system-ui,sans-serif;
@@ -363,7 +371,7 @@ HTML_PAGE = """<!DOCTYPE html>
     box-shadow:0 0 10px #34d399;
     animation:livePulse 1.8s ease-in-out infinite;
   }
-  .grid { max-width:1440px; margin:0 auto; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; align-items:stretch; }
+  .grid { max-width:1440px; margin:0 auto; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; align-items:stretch; }
   .card {
     position:relative;
     overflow:hidden;
@@ -454,61 +462,83 @@ HTML_PAGE = """<!DOCTYPE html>
   .verify-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   .verify-grid img { display:block; width:100%; height:300px; object-fit:contain; border:1px solid #16324f; border-radius:8px; background:#040811; }
   .close-btn { width:auto; margin:0; padding:7px 11px; }
-  /* CloakPixel presentation stage overrides */
-  body { background:radial-gradient(circle at 50% 14%,#0c3559 0%,#061326 42%,#030812 100%) !important; padding:0 24px 28px !important; }
-  body::before { display:none; }
-  .topbar { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid rgba(56,189,248,0.15); }
-  .brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px; color:#f0f9ff; }
-  .brand-icon { width:28px; height:28px; border-radius:50%; border:2px solid #38bdf8; display:flex; align-items:center; justify-content:center; box-shadow:0 0 12px rgba(56,189,248,0.5); color:#38bdf8; font-size:13px; }
-  .nav-pills { display:flex; gap:10px; align-items:center; }
-  .pill { background:rgba(12,36,60,0.75); border:1px solid rgba(56,189,248,0.35); color:#7dd3fc; padding:5px 12px; border-radius:999px; font-size:11.5px; font-weight:600; }
-  .pill-live { border-color:#34d399; color:#6ee7b7; }
-  .hero { text-align:center; padding:22px 10px 18px; max-width:820px; margin:0 auto; }
-  .eyebrow { color:#38bdf8; font-size:11.5px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin-bottom:8px; }
-  .hero-title { font-size:38px; font-weight:800; margin:0; color:#fff; display:inline-flex; align-items:center; gap:12px; text-shadow:0 0 28px rgba(56,189,248,0.35); }
-  .ver-badge { font-size:14px; font-weight:700; color:#38bdf8; background:rgba(2,132,199,0.2); border:1px solid #0284c7; padding:3px 10px; border-radius:8px; }
-  .hero-desc { color:#94a3b8; font-size:13.5px; line-height:1.5; margin:10px auto 16px; max-width:650px; }
-  .shields { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; max-width:860px; margin:0 auto 22px; }
-  .shield-card { background:rgba(8,22,40,0.78); border:1px solid rgba(56,189,248,0.28); border-radius:12px 12px 22px 22px; padding:9px 6px; text-align:center; box-shadow:inset 0 0 14px rgba(56,189,248,0.08); }
-  .sh-top { font-size:9px; color:#7dd3fc; letter-spacing:1px; text-transform:uppercase; }
-  .sh-val { font-size:14px; font-weight:800; color:#fff; margin:2px 0; }
-  .sh-bot { font-size:9.5px; color:#34d399; font-weight:600; text-transform:uppercase; }
-  .grid { max-width:1260px; gap:18px !important; }
-  .card { background:rgba(10,22,40,0.85) !important; backdrop-filter:blur(8px); border:1px solid rgba(56,189,248,0.22) !important; border-radius:14px !important; padding:15px !important; }
-  .card-title { font-size:13.5px; letter-spacing:0.3px; text-transform:none; }
-  .img-box { height:195px; border:1px dashed rgba(56,189,248,0.25); border-radius:10px; }
-  .dl-btn { display:none; text-align:center; background:rgba(2,132,199,0.2); border:1px solid #38bdf8; color:#7dd3fc; padding:8px; border-radius:8px; margin-top:8px; font-size:12.5px; font-weight:600; text-decoration:none; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; min-height:62px; margin:0; padding:8px 12px; border:1px solid rgba(52,211,153,0.13); border-radius:10px; background:linear-gradient(90deg,rgba(7,18,31,0.96),rgba(8,20,35,0.96)); }
+  .brand { display:flex; align-items:center; gap:10px; color:#ecfdf5; font-size:17px; font-weight:800; }
+  .brand-icon { width:30px; height:30px; display:grid; place-items:center; border:1px solid #34d399; border-radius:50%; color:#34d399; box-shadow:0 0 16px rgba(52,211,153,0.25); }
+  .nav-pills { display:flex; gap:8px; }
+  .nav-pill { padding:7px 12px; border:1px solid rgba(52,211,153,0.24); border-radius:999px; color:#9ad4bb; background:rgba(8,26,19,0.82); font-size:11px; }
+  .nav-pill.live { border-color:rgba(52,211,153,0.48); color:#6ee7b7; }
+  .hero { max-width:820px; margin:0 auto; padding:12px 12px 8px; text-align:center; }
+  .eyebrow { color:#34d399; font-size:9.5px; font-weight:800; letter-spacing:1.8px; text-transform:uppercase; }
+  .hero-title { margin:8px 0 6px; display:flex; justify-content:center; align-items:center; gap:12px; font-size:38px; line-height:1.05; letter-spacing:0; color:#f8faf9; background:none; -webkit-background-clip:initial; background-clip:initial; }
+  .version-badge { padding:3px 9px; border:1px solid rgba(52,211,153,0.38); border-radius:7px; color:#6ee7b7; background:rgba(16,185,129,0.10); font-size:13px; }
+  .hero-desc { max-width:720px; margin:4px auto 0; color:#8da69a; line-height:1.35; font-size:12px; }
+  .header { display:none !important; }
+  .telemetry { max-width:1440px; margin:0 auto 18px; display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  .telemetry-card { min-height:78px; background:linear-gradient(145deg,rgba(10,24,19,0.96),rgba(6,15,12,0.96)); border:1px solid rgba(52,211,153,0.18); border-radius:8px; padding:10px 12px; }
+  .telemetry-label { color:#86a89a; font-size:10px; letter-spacing:1px; text-transform:uppercase; }
+  .telemetry-value { color:#ecfdf5; font-size:19px; font-weight:800; margin-top:2px; }
+  .telemetry-sub { color:#34d399; font-size:10px; margin-top:1px; }
+  .upload-row { display:flex; gap:6px; }
+  .upload-row input[type="file"] { flex:1; min-width:0; }
+  .upload-row button { flex:0 0 auto; width:auto; margin:0; padding:7px 9px; background:#123529; border-color:rgba(52,211,153,0.35); box-shadow:none; }
+  .split-box { position:relative; }
+  .split-box img { position:absolute; inset:0; display:block; }
+  .split-cloaked { clip-path:inset(0 0 0 var(--split,50%)); }
+  .split-line { position:absolute; z-index:5; left:var(--split,50%); top:0; bottom:0; width:2px; background:#34d399; box-shadow:0 0 12px #34d399; pointer-events:none; }
+  .split-control { position:absolute; z-index:8; left:8px; right:8px; bottom:6px; width:calc(100% - 16px); accent-color:#34d399; }
+  .live-scraper { max-width:1440px; margin:12px auto 0; padding:14px 18px 16px; border:1px solid rgba(56,189,248,0.30); border-radius:10px; background:rgba(7,22,38,0.82); }
+  .live-scraper-title { padding:0 0 12px; color:#38bdf8; font-size:14px; font-weight:900; letter-spacing:1px; text-transform:uppercase; }
+  .scraper-grid { display:grid; grid-template-columns:minmax(180px,1fr) minmax(220px,1.15fr) 210px; gap:10px; align-items:stretch; }
+  .scraper-card { min-height:74px; background:linear-gradient(145deg,rgba(9,25,19,0.96),rgba(5,14,11,0.96)); border:1px solid rgba(52,211,153,0.16); border-radius:6px; padding:8px 11px; }
+  .scraper-label { color:#91aa9f; font-size:10.5px; text-transform:uppercase; letter-spacing:0.7px; }
+  .scraper-value { color:#ecfdf5; font-size:16px; font-weight:800; margin-top:3px; }
+  .stress-button { height:74px; margin:0; width:190px; align-self:stretch; background:linear-gradient(135deg,#059669,#087f73); border-color:rgba(52,211,153,0.48); }
   @keyframes livePulse { 50% { opacity:0.45; box-shadow:0 0 4px #34d399; } }
   @keyframes cardEnter { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
   @keyframes scanLine { 0%,100% { top:-2px; } 50% { top:100%; } }
   @keyframes stageSweep { from { background-position:180% 0; } to { background-position:-180% 0; } }
+  /* Final screenshot-matched viewport proportions */
+  body { padding:0 20px 18px !important; background:radial-gradient(circle at 50% 12%,#0b2a4a 0%,#07162a 36%,#040913 100%) !important; }
+  .topbar { min-height:74px; height:74px; margin:0 -20px 0; padding:0 44px; border-radius:0; border-left:0; border-right:0; }
+  .brand { white-space:nowrap; }
+  .nav-pills { flex-wrap:nowrap; }
+  .hero { max-width:820px; height:210px; margin:0 auto; padding:34px 12px 20px; overflow:hidden; }
+  .hero-title { margin:10px 0 8px; font-size:48px; white-space:nowrap; }
+  .eyebrow { font-size:12px; }
+  .hero-desc { max-width:700px; min-height:44px; font-size:14px; line-height:1.6; }
+  .telemetry { max-width:1440px; height:98px; min-height:98px; margin:0 auto 22px; gap:14px; }
+  .telemetry-card { min-height:98px; padding:16px 22px; }
+  .telemetry-value { font-size:22px; }
+  .grid { max-width:1440px; height:360px; margin:0 auto; gap:18px; }
+  .card { height:360px; min-height:360px; padding:15px; }
+  .card-title { font-size:14px; }
+  .img-box { height:195px; }
+  .live-scraper { height:132px; margin-top:18px; }
   @media (prefers-reduced-motion:reduce) { * { animation:none !important; transition:none !important; } }
   @media (max-width:900px) { body { padding:12px; } .grid { grid-template-columns:1fr; } .header { align-items:flex-start; gap:10px; } h1 { font-size:21px; } .badge { white-space:nowrap; } }
 </style>
 </head>
 <body>
   <div class="topbar">
-    <div class="brand"><div class="brand-icon">◈</div> CloakPixel AI</div>
+    <div class="brand"><span class="brand-icon">◆</span>CloakPixel AI</div>
     <div class="nav-pills">
-      <span class="pill">PyTorch KeypointRCNN</span>
-      <span class="pill">EOT-PGD Perturbation</span>
-      <span class="pill pill-live">● 100% On-Device Offline</span>
+      <span class="nav-pill">PyTorch KeypointRCNN</span>
+      <span class="nav-pill">EOT-PGD Perturbation</span>
+      <span class="nav-pill live">● 100% On-Device Offline</span>
     </div>
   </div>
-
-  <div class="hero">
-    <div class="eyebrow">Threat Prevention • Biometric Adversarial Defense</div>
-    <h1 class="hero-title">CloakPixel AI <span class="ver-badge">v2.0</span></h1>
+  <section class="hero">
+    <div class="eyebrow">THREAT PREVENTION • BIOMETRIC ADVERSARIAL DEFENSE</div>
+    <h1 class="hero-title">CloakPixel AI <span class="version-badge">v2.0</span></h1>
     <p class="hero-desc">Protect personal photos from unauthorized facial recognition scraping and deepfake manipulation with invisible, JPEG-resistant pixel perturbations and zero-trace EXIF metadata stripping.</p>
-  </div>
+  </section>
 
-  <div class="shields">
-    <div class="shield-card"><div class="sh-top">Privacy</div><div class="sh-val">100%</div><div class="sh-bot">On-Device</div></div>
-    <div class="shield-card"><div class="sh-top">Landmarks</div><div class="sh-val" id="shKp">5-Point</div><div class="sh-bot">KeypointRCNN</div></div>
-    <div class="shield-card"><div class="sh-top">Attack</div><div class="sh-val">EOT-PGD</div><div class="sh-bot">JPEG-Safe</div></div>
-    <div class="shield-card"><div class="sh-top">Scraper Match</div><div class="sh-val" id="shMatch">0.0%</div><div class="sh-bot">Defeated</div></div>
-    <div class="shield-card"><div class="sh-top">Fidelity</div><div class="sh-val" id="shSsim">&gt;0.98</div><div class="sh-bot">SSIM Score</div></div>
-    <div class="shield-card"><div class="sh-top">Metadata</div><div class="sh-val">0 Bytes</div><div class="sh-bot">EXIF Wiped</div></div>
+  <div class="telemetry">
+    <div class="telemetry-card"><div class="telemetry-label">Processing Time</div><div class="telemetry-value" id="telemetryTime">-- ms</div><div class="telemetry-sub">Live inference</div></div>
+    <div class="telemetry-card"><div class="telemetry-label">Visual Fidelity</div><div class="telemetry-value" id="telemetrySsim">-- SSIM</div><div class="telemetry-sub">Before / after</div></div>
+    <div class="telemetry-card"><div class="telemetry-label">Signal Quality</div><div class="telemetry-value" id="telemetryPsnr">-- dB</div><div class="telemetry-sub">PSNR</div></div>
+    <div class="telemetry-card"><div class="telemetry-label">Cosine Match</div><div class="telemetry-value" id="telemetryCosine">--</div><div class="telemetry-sub">Before / cloaked</div></div>
   </div>
 
   <div class="grid">
@@ -519,7 +549,15 @@ HTML_PAGE = """<!DOCTYPE html>
         <button type="button" class="sample-btn" onclick="loadSample('profile')">Sample 2</button>
         <button type="button" class="sample-btn" onclick="loadSample('studio')">Sample 3</button>
       </div>
-      <input type="file" id="fileIn" accept="image/*">
+      <div class="upload-row">
+        <input type="file" id="fileIn" accept="image/*">
+        <button type="button" onclick="openWebcam()">Live Webcam Capture</button>
+      </div>
+      <dialog id="webcamDialog" style="max-width:620px;width:92vw;background:#07110d;color:#ecfdf5;border:1px solid #166534;border-radius:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center"><b>Live Webcam Capture</b><button type="button" onclick="closeWebcam()" style="width:auto;margin:0;padding:7px 10px">Close</button></div>
+        <video id="webcamVideo" autoplay playsinline style="width:100%;height:360px;object-fit:contain;margin-top:10px;background:#020504"></video>
+        <button type="button" onclick="captureWebcam()">Capture Portrait</button>
+      </dialog>
       <div class="img-box"><span class="placeholder" id="ph1">No photo selected</span><img id="origImg"></div>
       <label>Perturbation Budget (Epsilon): <b id="epsVal" style="color:#38bdf8">0.025</b></label>
       <input type="range" id="eps" min="0.01" max="0.06" step="0.005" value="0.025" style="width:100%;accent-color:#06b6d4" oninput="epsVal.innerText=this.value">
@@ -529,7 +567,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-title">2. Cloaked Image (Visually Unchanged)</div>
-      <div class="img-box"><span class="placeholder" id="ph2">Awaiting shield activation</span><img id="cloakImg"></div>
+      <div class="img-box split-box" id="splitBox"><span class="placeholder" id="ph2">Awaiting shield activation</span><img id="splitOriginal"><img id="cloakImg" class="split-cloaked"><div class="split-line" id="splitLine"></div><input class="split-control" id="splitControl" type="range" min="0" max="100" value="50" aria-label="Before and after image split"></div>
       <div class="stat" id="auditBox">Upload a portrait and click <b>Activate Pixel Shield</b> to run live biometric attacker verification.</div>
       <div class="action-row">
         <a id="dlLink" class="dl-btn" download="cloaked_protected.png">Download PNG</a>
@@ -547,6 +585,20 @@ HTML_PAGE = """<!DOCTYPE html>
         • <b>Right Panel:</b> Cyan shield locks onto detected facial landmarks (eyes, nose, jawline) while wiping hidden EXIF GPS tags.
       </div>
     </div>
+  </div>
+
+  <div class="live-scraper">
+    <div class="live-scraper-title">LIVE AI SCRAPER &amp; DEEPFAKE TEST</div>
+    <div class="scraper-grid">
+      <div class="scraper-card"><div class="scraper-label">Original Image vs. Reference</div><div class="scraper-value" id="scraperOriginalTop">-- Identity Match</div></div>
+      <div class="scraper-card"><div class="scraper-label">Cloaked / Compressed vs. Reference</div><div class="scraper-value" id="scraperCloakedTop">-- Identity Match</div></div>
+      <button type="button" class="stress-button" onclick="runStressTest()">Simulate WhatsApp / Instagram</button>
+    </div>
+  </div>
+
+  <div id="scraperResults" style="display:none">
+    <div id="scraperOriginal"></div>
+    <div id="scraperCloaked"></div>
   </div>
 
   <div class="verify-modal" id="verifyModal">
@@ -572,9 +624,14 @@ HTML_PAGE = """<!DOCTYPE html>
 let imgDataUrl = null;
 let verificationData = null;
 let exifData = null;
+let webcamStream = null;
+let originalDataUrl = null;
+let stressInProgress = false;
 function showLoadedImage(dataUrl) {
   imgDataUrl = dataUrl;
   origImg.src = dataUrl;
+  splitOriginal.src = dataUrl;
+  originalDataUrl = dataUrl;
   ph1.style.display = "none";
 }
 async function loadSample(name) {
@@ -616,9 +673,14 @@ async function runCloak() {
   heatImg.src = d.heatmap;  ph3.style.display = "none";
   dlLink.href = d.cloaked;
   dlLink.style.display = "block";
-  shKp.innerText = d.landmarks + "-Point";
-  shMatch.innerText = d.cloak_match + "%";
-  shSsim.innerText = d.ssim;
+  telemetryTime.innerText = d.ms + " ms";
+  telemetrySsim.innerText = d.ssim + " SSIM";
+  telemetryPsnr.innerText = d.psnr + " dB";
+  telemetryCosine.innerText = d.cosine_similarity.toFixed(3) + " → " + d.cloaked_cosine_similarity.toFixed(3);
+  scraperOriginal.innerHTML = `<span class="bad">${d.orig_match}% Identity Match</span> — Vulnerable`;
+  scraperCloaked.innerHTML = `<span class="good">${d.cloak_match}% Identity Match</span> — Scraper Defeated`;
+  scraperOriginalTop.innerHTML = `<span class="bad">${d.orig_match}% Identity Match</span> — Vulnerable`;
+  scraperCloakedTop.innerHTML = `<span class="good">${d.cloak_match}% Identity Match</span> — Scraper Defeated`;
   verificationData = d.detector;
   exifData = d.exif_diff;
   if (verificationData) {
@@ -655,6 +717,52 @@ function openVerification() {
   verifyModal.classList.add("open");
 }
 function closeVerification() { verifyModal.classList.remove("open"); }
+async function openWebcam() {
+  if (!navigator.mediaDevices?.getUserMedia) return alert("Webcam capture is not supported in this browser.");
+  try {
+    webcamStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:false});
+    webcamVideo.srcObject = webcamStream;
+    webcamDialog.showModal();
+  } catch (error) { alert("Could not access the webcam. Allow camera permission and retry."); }
+}
+function closeWebcam() {
+  if (webcamStream) webcamStream.getTracks().forEach(track => track.stop());
+  webcamStream = null;
+  webcamDialog.close();
+}
+function captureWebcam() {
+  const canvas=document.createElement('canvas');
+  canvas.width=webcamVideo.videoWidth; canvas.height=webcamVideo.videoHeight;
+  canvas.getContext('2d').drawImage(webcamVideo,0,0);
+  showLoadedImage(canvas.toDataURL('image/jpeg',0.92));
+  closeWebcam();
+}
+splitControl.oninput = () => {
+  splitBox.style.setProperty('--split', splitControl.value + '%');
+  splitLine.style.left = splitControl.value + '%';
+};
+async function runStressTest() {
+  if (!verificationData || !originalDataUrl || !cloakImg.src) return alert("Run the shield first.");
+  if (stressInProgress) return;
+  stressInProgress=true;
+  const button=document.querySelector('.stress-button');
+  button.textContent='Running Compression...';
+  const cloakedUrl=cloakImg.src;
+  try {
+    const source=await fetch(cloakedUrl).then(r=>r.blob());
+    const bitmap=await createImageBitmap(source);
+    const canvas=document.createElement('canvas');
+    canvas.width=Math.round(bitmap.width*0.9); canvas.height=Math.round(bitmap.height*0.9);
+    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+    const stressUrl=canvas.toDataURL('image/jpeg',0.65);
+    const res=await fetch('/stress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({original:originalDataUrl,cloaked:stressUrl})});
+    const d=await res.json();
+    if (!res.ok) throw new Error(d.error||'Stress test failed');
+    scraperCloakedTop.innerHTML=`<span class="good">${d.stress_match}% Identity Match</span> — After 65% JPEG`;
+    if (typeof scraperCloaked !== "undefined") scraperCloaked.innerHTML=`<span class="good">${d.stress_match}% Identity Match</span> — After 65% JPEG`;
+  } catch (error) { alert(error.message||'Stress test failed'); }
+  stressInProgress=false; button.textContent='Simulate WhatsApp / Instagram';
+}
 function openExif() {
   if (!exifData) return alert("Run the shield first.");
   exifJson.textContent = JSON.stringify(exifData, null, 2);
@@ -692,6 +800,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(HTML_PAGE.encode("utf-8"))
 
     def do_POST(self):
+        if self.path == "/stress":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_REQUEST_BYTES:
+                    self.send_json(400, {"error": "Invalid stress-test request."})
+                    return
+                payload = json.loads(self.rfile.read(length))
+                original_pil, _, _ = parse_cloak_request(json.dumps({"image": payload["original"], "epsilon": 0.025, "jpeg": True}).encode())
+                cloaked_pil, _, _ = parse_cloak_request(json.dumps({"image": payload["cloaked"], "epsilon": 0.025, "jpeg": True}).encode())
+                original_rgb = np.array(ImageOps.exif_transpose(original_pil).convert("RGB"))
+                cloaked_rgb = np.array(ImageOps.exif_transpose(cloaked_pil).convert("RGB"))
+                box, _ = detect_facial_landmarks(original_rgb)
+                original_embedding = extract_embedding(original_rgb, box)
+                stressed_embedding = extract_embedding(cloaked_rgb, box)
+                stress_cosine = float(np.clip(np.dot(original_embedding, stressed_embedding), -1.0, 1.0))
+                stress_match = round(max(0.0, min(100.0, stress_cosine * 100.0)), 1)
+                self.send_json(200, {"stress_match": stress_match, "stress_cosine": stress_cosine})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc) or "Could not run the compression stress test."})
+            return
+
         if self.path != "/cloak":
             self.send_json(404, {"error": "Endpoint not found."})
             return
@@ -726,6 +855,7 @@ class Handler(BaseHTTPRequestHandler):
             cloaked_rgb, box, landmarks = apply_cloak(orig_rgb, epsilon=epsilon)
             audited_rgb = jpeg_roundtrip(cloaked_rgb, 75) if test_jpeg else cloaked_rgb
             ssim_val = compute_ssim(orig_rgb, cloaked_rgb)
+            psnr_val = compute_psnr(orig_rgb, cloaked_rgb)
             diff = np.abs(cloaked_rgb.astype(np.float32) - orig_rgb.astype(np.float32))
             gray_amp = cv2.cvtColor(np.clip(diff * 20.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
             heatmap = np.zeros_like(orig_rgb)
@@ -764,6 +894,7 @@ class Handler(BaseHTTPRequestHandler):
                 "orig_match": orig_match,
                 "cloak_match": cloak_match,
                 "ssim": f"{ssim_val:.4f}",
+                "psnr": f"{psnr_val:.2f}",
                 "exif": exif_status,
                 "ms": int((time.perf_counter() - t0) * 1000),
                 "cosine_similarity": cosine_similarity,
