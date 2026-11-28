@@ -158,12 +158,39 @@ def extract_embedding(img_rgb: np.ndarray, box: tuple[int, int, int, int]) -> np
     return emb / (np.linalg.norm(emb) + 1e-8)
 
 
+def measure_compressed_match(
+    original_rgb: np.ndarray,
+    compressed_rgb: np.ndarray,
+    box: tuple[int, int, int, int],
+    original_embedding: np.ndarray | None = None,
+) -> tuple[float, float]:
+    """Compare the original and compressed face crops using local cosine similarity."""
+    original_h, original_w = original_rgb.shape[:2]
+    compressed_h, compressed_w = compressed_rgb.shape[:2]
+    x1, y1, x2, y2 = box
+    scaled_box = (
+        max(0, round(x1 * compressed_w / original_w)),
+        max(0, round(y1 * compressed_h / original_h)),
+        min(compressed_w, round(x2 * compressed_w / original_w)),
+        min(compressed_h, round(y2 * compressed_h / original_h)),
+    )
+    reference = original_embedding if original_embedding is not None else extract_embedding(original_rgb, box)
+    compressed_embedding = extract_embedding(compressed_rgb, scaled_box)
+    cosine = float(np.clip(np.dot(reference, compressed_embedding), -1.0, 1.0))
+    match = round(max(0.0, min(100.0, cosine * 100.0)), 1)
+    return cosine, match
+
+
 # ---------------------------------------------------------
 # 4. PYTORCH ITERATIVE FGSM / PGD ADVERSARIAL CLOAKING
 # ---------------------------------------------------------
-def apply_cloak(img_rgb: np.ndarray, epsilon: float = 0.035) -> tuple[np.ndarray, tuple, list]:
-    """Optimize the face crop with 8-step EOT-PGD and paste it into the source image."""
-    box, landmarks = detect_facial_landmarks(img_rgb)
+def apply_cloak(
+    img_rgb: np.ndarray,
+    epsilon: float = 0.035,
+    detection: tuple[tuple[int, int, int, int], list] | None = None,
+) -> tuple[np.ndarray, tuple, list]:
+    """Optimize the face crop with 12-step JPEG-aware EOT-PGD and paste it into the source image."""
+    box, landmarks = detection if detection is not None else detect_facial_landmarks(img_rgb)
     x1, y1, x2, y2 = box
     face_rgb = img_rgb[y1:y2, x1:x2]
     if face_rgb.size == 0:
@@ -188,13 +215,13 @@ def apply_cloak(img_rgb: np.ndarray, epsilon: float = 0.035) -> tuple[np.ndarray
         orig_feat = nn.functional.normalize(orig_feat - orig_feat.mean(dim=1, keepdim=True), dim=1)
 
     adv_t = orig_t.clone().detach()
-    steps = 8
+    steps = 12
     alpha = (epsilon / steps) * 1.5
     for _ in range(steps):
         adv_t.requires_grad_(True)
         smoothed = TF.gaussian_blur(adv_t, kernel_size=[3, 3], sigma=[0.5, 0.5])
 
-        # Fast EOT: a fixed resize round trip approximates social-media scaling.
+        # EOT: average over clean, resized, and noisy views before updating pixels.
         tensor_h, tensor_w = smoothed.shape[-2], smoothed.shape[-1]
         transformed = nn.functional.interpolate(
             smoothed, size=(max(16, tensor_h // 2), max(16, tensor_w // 2)),
@@ -203,11 +230,18 @@ def apply_cloak(img_rgb: np.ndarray, epsilon: float = 0.035) -> tuple[np.ndarray
         transformed = nn.functional.interpolate(
           transformed, size=(tensor_h, tensor_w), mode="bilinear", align_corners=False
         )
+        noise = torch.randn_like(smoothed) * 0.008
+        noisy = torch.clamp(smoothed + noise, 0.0, 1.0)
 
-        res = nn.functional.interpolate(transformed, size=(128, 128), mode="bilinear", align_corners=False)
-        normed = TF.normalize(res, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        adv_feat = FEATURE_EXTRACTOR(normed).flatten(1)
-        adv_feat = nn.functional.normalize(adv_feat - adv_feat.mean(dim=1, keepdim=True), dim=1)
+        variants = (smoothed, transformed, noisy)
+        variant_feats = []
+        for variant in variants:
+            res = nn.functional.interpolate(variant, size=(128, 128), mode="bilinear", align_corners=False)
+            normed = TF.normalize(res, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            adv_feat = FEATURE_EXTRACTOR(normed).flatten(1)
+            adv_feat = nn.functional.normalize(adv_feat - adv_feat.mean(dim=1, keepdim=True), dim=1)
+            variant_feats.append(adv_feat)
+        adv_feat = torch.stack(variant_feats).mean(dim=0)
 
         loss = torch.sum(adv_feat * orig_feat)
         FEATURE_EXTRACTOR.zero_grad()
@@ -395,6 +429,7 @@ HTML_PAGE = """<!DOCTYPE html>
     position:relative;
     width:100%;
     height:195px;
+    flex-shrink:0;
     background:radial-gradient(circle at 50% 110%,rgba(14,165,233,0.11),transparent 42%),#050b13;
     border:1px solid rgba(56,189,248,0.14);
     border-radius:8px;
@@ -413,7 +448,7 @@ HTML_PAGE = """<!DOCTYPE html>
   .confidence { margin:8px 0 2px; }
   .confidence-row { margin:5px 0; }
   .confidence-label { display:flex; justify-content:space-between; margin-bottom:3px; font-size:11.5px; }
-  .confidence-track { height:8px; overflow:hidden; border-radius:999px; background:#111f30; border:1px solid rgba(148,163,184,0.12); }
+  .confidence-track { height:10px; overflow:hidden; border-radius:999px; background:#111f30; border:1px solid rgba(148,163,184,0.12); }
   .confidence-bar { height:100%; width:0; border-radius:999px; transition:width 900ms cubic-bezier(.2,.8,.2,1); }
   .confidence-bar.red { background:linear-gradient(90deg,#ef4444,#fb7185); box-shadow:0 0 12px rgba(248,113,113,0.42); }
   .confidence-bar.green { background:linear-gradient(90deg,#10b981,#34d399); box-shadow:0 0 12px rgba(52,211,153,0.42); }
@@ -448,19 +483,27 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   .bad { color:#fda4af; font-weight:800; }
   .good { color:#6ee7b7; font-weight:800; }
+  .warn { color:#fcd34d; font-weight:800; }
   .metric { display:inline-block; min-width:54px; text-align:center; padding:1px 7px; border-radius:999px; }
   .metric.bad { background:rgba(251,113,133,0.11); border:1px solid rgba(251,113,133,0.28); }
   .metric.good { background:rgba(52,211,153,0.10); border:1px solid rgba(52,211,153,0.28); box-shadow:0 0 12px rgba(52,211,153,0.06); }
   .dl-btn { display:none; text-align:center; background:rgba(14,52,76,0.72); border:1px solid rgba(34,211,238,0.38); color:#67e8f9; padding:7px; border-radius:7px; margin-top:7px; font-size:12px; font-weight:700; text-decoration:none; }
   .dl-btn:hover { background:rgba(21,72,101,0.82); }
   .action-row { display:flex; gap:7px; margin-top:8px; }
-  .action-row button, .action-row .dl-btn { flex:1; margin-top:0; }
-  .verify-modal { display:none; position:fixed; z-index:20; inset:0; background:rgba(2,6,23,0.88); backdrop-filter:blur(8px); align-items:center; justify-content:center; padding:24px; }
+  .action-row button, .action-row .dl-btn { flex:1; min-width:0; margin-top:0; padding:9px 5px; font-size:0.85rem; white-space:nowrap; }
+  .verify-modal { display:none; position:fixed; z-index:20; inset:0; background:rgba(2,6,23,0.88); backdrop-filter:blur(8px); align-items:center; justify-content:center; padding:24px; overflow-y:auto; }
   .verify-modal.open { display:flex; }
-  .verify-panel { width:min(1000px,94vw); background:#091524; border:1px solid rgba(56,189,248,0.38); border-radius:10px; padding:16px; box-shadow:0 24px 70px rgba(0,0,0,0.55); }
-  .verify-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
-  .verify-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .verify-grid img { display:block; width:100%; height:300px; object-fit:contain; border:1px solid #16324f; border-radius:8px; background:#040811; }
+  .verify-panel { width:min(1000px,94vw); max-height:calc(100vh - 48px); overflow-y:auto; background:#091524; border:1px solid rgba(56,189,248,0.38); border-radius:10px; padding:16px; box-shadow:0 24px 70px rgba(0,0,0,0.55); }
+  .verify-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }
+  .verify-head > b { min-width:0; overflow-wrap:anywhere; }
+  .verify-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+  .verify-grid > div { min-width:0; overflow-wrap:anywhere; }
+  .verify-grid img { display:block; width:100%; max-width:100%; height:300px; object-fit:contain; border:1px solid #16324f; border-radius:8px; background:#040811; }
+  #verifyStats { min-width:0; overflow-wrap:anywhere; }
+  #exifDialog { max-height:85vh; padding:16px; overflow:auto; }
+  #exifDialog form > div { gap:12px; align-items:center; }
+  #exifDialog form b { min-width:0; overflow-wrap:anywhere; }
+  #exifJson { max-width:100%; max-height:65vh; overflow:auto; overflow-wrap:anywhere; word-break:break-word; }
   .close-btn { width:auto; margin:0; padding:7px 11px; }
   .topbar { display:flex; justify-content:space-between; align-items:center; min-height:62px; margin:0; padding:8px 12px; border:1px solid rgba(52,211,153,0.13); border-radius:10px; background:linear-gradient(90deg,rgba(7,18,31,0.96),rgba(8,20,35,0.96)); }
   .brand { display:flex; align-items:center; gap:10px; color:#ecfdf5; font-size:17px; font-weight:800; }
@@ -482,22 +525,62 @@ HTML_PAGE = """<!DOCTYPE html>
   .upload-row { display:flex; gap:6px; }
   .upload-row input[type="file"] { flex:1; min-width:0; }
   .upload-row button { flex:0 0 auto; width:auto; margin:0; padding:7px 9px; background:#123529; border-color:rgba(52,211,153,0.35); box-shadow:none; }
+  #uploadPreview, #splitBox, .grid > .card:nth-child(3) > .img-box {
+    height:auto;
+    min-height:0;
+    aspect-ratio:4 / 3;
+  }
+  .img-box > img { width:100%; height:100%; object-fit:contain; }
   .split-box { position:relative; }
   .split-box img { position:absolute; inset:0; display:block; }
-  .split-cloaked { clip-path:inset(0 0 0 var(--split,50%)); }
-  .split-line { position:absolute; z-index:5; left:var(--split,50%); top:0; bottom:0; width:2px; background:#34d399; box-shadow:0 0 12px #34d399; pointer-events:none; }
-  .split-control { position:absolute; z-index:8; left:8px; right:8px; bottom:6px; width:calc(100% - 16px); accent-color:#34d399; }
+  .split-box #splitOriginal { z-index:1; }
+  .split-box #cloakImg { display:none; }
+  .split-box #cloakImg.ready { display:block; z-index:2; clip-path:inset(0 calc(100% - var(--split,50%)) 0 0); }
+  .split-line { position:absolute; z-index:5; left:var(--split,50%); top:0; bottom:0; width:2px; background:#34d399; box-shadow:0 0 12px #34d399; pointer-events:none; display:none; }
+  .split-control { position:absolute; z-index:8; inset:0; width:100%; height:100%; margin:0; padding:0; appearance:none; background:transparent; cursor:ew-resize; display:none; }
+  .split-control::-webkit-slider-runnable-track { height:100%; background:transparent; }
+  .split-control::-webkit-slider-thumb { width:22px; height:42px; appearance:none; border:1px solid #34d399; border-radius:999px; background:rgba(6,25,37,.9); box-shadow:0 0 12px rgba(52,211,153,.65); }
+  .split-control::-moz-range-track { height:100%; background:transparent; border:0; }
+  .split-control::-moz-range-thumb { width:22px; height:42px; border:1px solid #34d399; border-radius:999px; background:rgba(6,25,37,.9); box-shadow:0 0 12px rgba(52,211,153,.65); }
+  .split-control:focus-visible { outline:2px solid #67e8f9; outline-offset:-3px; }
+  .comparison-label { position:absolute; z-index:6; top:8px; padding:4px 8px; border-radius:999px; color:#ecfdf5; background:rgba(2,6,23,0.72); font-size:10px; font-weight:800; letter-spacing:.04em; display:none; }
+  .comparison-label.before { left:8px; }
+  .comparison-label.after { right:8px; }
+  .split-box.cloaked .split-line, .split-box.cloaked .split-control, .split-box.cloaked .comparison-label { display:block; }
+  .progress-panel { margin-top:9px; padding:9px 10px; border:1px solid rgba(56,189,248,.22); border-radius:8px; background:rgba(4,16,29,.92); }
+  .progress-panel[hidden] { display:none; }
+  .progress-heading { display:flex; justify-content:space-between; gap:8px; margin-bottom:7px; color:#bfefff; font-size:11px; font-weight:750; }
+  .progress-track { height:6px; overflow:hidden; border-radius:999px; background:#13283a; }
+  .progress-fill { width:35%; height:100%; border-radius:inherit; background:linear-gradient(90deg,#06b6d4,#34d399); animation:progressSweep 1.3s ease-in-out infinite alternate; }
+  .progress-panel.complete .progress-fill { width:100%; animation:none; }
+  .progress-panel.error .progress-fill { width:100%; background:#fb7185; animation:none; }
+  .progress-steps { display:grid; gap:4px; margin:8px 0 0; padding:0; list-style:none; color:#71899a; font-size:10.5px; }
+  .progress-steps li::before { content:"○"; display:inline-block; width:17px; color:#607789; }
+  .progress-steps li.active { color:#67e8f9; }
+  .progress-steps li.active::before { content:"◌"; color:#67e8f9; }
+  .progress-steps li.done { color:#6ee7b7; }
+  .progress-steps li.done::before { content:"✓"; color:#6ee7b7; }
+  .cosine-note { display:block; margin-top:5px; color:#8ca7ba; font-size:10.5px; }
   .live-scraper { max-width:1440px; margin:12px auto 0; padding:14px 18px 16px; border:1px solid rgba(56,189,248,0.30); border-radius:10px; background:rgba(7,22,38,0.82); }
   .live-scraper-title { padding:0 0 12px; color:#38bdf8; font-size:14px; font-weight:900; letter-spacing:1px; text-transform:uppercase; }
   .scraper-grid { display:grid; grid-template-columns:minmax(180px,1fr) minmax(220px,1.15fr) 210px; gap:10px; align-items:stretch; }
   .scraper-card { min-height:74px; background:linear-gradient(145deg,rgba(9,25,19,0.96),rgba(5,14,11,0.96)); border:1px solid rgba(52,211,153,0.16); border-radius:6px; padding:8px 11px; }
   .scraper-label { color:#91aa9f; font-size:10.5px; text-transform:uppercase; letter-spacing:0.7px; }
   .scraper-value { color:#ecfdf5; font-size:16px; font-weight:800; margin-top:3px; }
-  .stress-button { height:74px; margin:0; width:190px; align-self:stretch; background:linear-gradient(135deg,#059669,#087f73); border-color:rgba(52,211,153,0.48); }
+  .stress-button { min-height:52px; margin:0; width:auto; align-self:stretch; padding:10px 16px; border-radius:999px; background:linear-gradient(135deg,rgba(5,150,105,.18),rgba(8,127,115,.28)); border-color:rgba(52,211,153,0.55); color:#a7f3d0; white-space:nowrap; }
+  .stress-button:disabled { opacity:.7; cursor:wait; }
+  .stress-result { margin-top:10px; padding:8px 12px; border:1px solid rgba(52,211,153,.28); border-radius:999px; background:rgba(16,185,129,.08); color:#a7f3d0; font-size:12px; font-weight:750; }
+  .stress-result.error { border-color:rgba(251,113,133,.35); background:rgba(251,113,133,.08); color:#fda4af; }
+  .stress-result.review { border-color:rgba(251,191,36,.35); background:rgba(251,191,36,.08); color:#fcd34d; }
   @keyframes livePulse { 50% { opacity:0.45; box-shadow:0 0 4px #34d399; } }
   @keyframes cardEnter { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
   @keyframes scanLine { 0%,100% { top:-2px; } 50% { top:100%; } }
   @keyframes stageSweep { from { background-position:180% 0; } to { background-position:-180% 0; } }
+  @keyframes progressSweep { from { transform:translateX(-20%); } to { transform:translateX(190%); } }
+  .webcam-stage { position:relative; }
+  #webcamCountdown { display:none; position:absolute; inset:10px 0 0; place-items:center; background:rgba(2,6,23,.5); color:#ecfdf5; font-size:clamp(54px,12vw,100px); font-weight:900; text-shadow:0 4px 24px rgba(0,0,0,.8); }
+  #webcamCountdown.active { display:grid; }
+  .webcam-hint { margin:8px 0 0; color:#a7f3d0; text-align:center; font-size:12px; }
   /* Final screenshot-matched viewport proportions */
   body { padding:0 20px 18px !important; background:radial-gradient(circle at 50% 12%,#0b2a4a 0%,#07162a 36%,#040913 100%) !important; }
   .topbar { min-height:74px; height:74px; margin:0 -20px 0; padding:0 44px; border-radius:0; border-left:0; border-right:0; }
@@ -510,11 +593,13 @@ HTML_PAGE = """<!DOCTYPE html>
   .telemetry { max-width:1440px; height:98px; min-height:98px; margin:0 auto 22px; gap:14px; }
   .telemetry-card { min-height:98px; padding:16px 22px; }
   .telemetry-value { font-size:22px; }
-  .grid { max-width:1440px; height:360px; margin:0 auto; gap:18px; }
-  .card { height:360px; min-height:360px; padding:15px; }
+  .grid { max-width:1440px; height:auto; margin:0 auto; gap:18px; }
+  .card { height:auto; min-height:360px; padding:15px; }
   .card-title { font-size:14px; }
   .img-box { height:195px; }
-  .live-scraper { height:132px; margin-top:18px; }
+  #uploadPreview, #splitBox, .grid > .card:nth-child(3) > .img-box { height:auto; }
+  .live-scraper { height:auto; margin-top:18px; }
+  .scraper-grid { grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; }
   @media (prefers-reduced-motion:reduce) { * { animation:none !important; transition:none !important; } }
   @media (max-width:900px) { body { padding:12px; } .grid { grid-template-columns:1fr; } .header { align-items:flex-start; gap:10px; } h1 { font-size:21px; } .badge { white-space:nowrap; } }
 </style>
@@ -531,14 +616,14 @@ HTML_PAGE = """<!DOCTYPE html>
   <section class="hero">
     <div class="eyebrow">THREAT PREVENTION • BIOMETRIC ADVERSARIAL DEFENSE</div>
     <h1 class="hero-title">CloakPixel AI <span class="version-badge">v2.0</span></h1>
-    <p class="hero-desc">Protect personal photos from unauthorized facial recognition scraping and deepfake manipulation with invisible, JPEG-resistant pixel perturbations and zero-trace EXIF metadata stripping.</p>
+    <p class="hero-desc">Apply face-region perturbations at the selected strength and strip metadata-sensitive EXIF tags before sharing a photo. Local image-feature similarity is an estimate, not a guarantee against face-recognition systems.</p>
   </section>
 
   <div class="telemetry">
     <div class="telemetry-card"><div class="telemetry-label">Processing Time</div><div class="telemetry-value" id="telemetryTime">-- ms</div><div class="telemetry-sub">Live inference</div></div>
     <div class="telemetry-card"><div class="telemetry-label">Visual Fidelity</div><div class="telemetry-value" id="telemetrySsim">-- SSIM</div><div class="telemetry-sub">Before / after</div></div>
     <div class="telemetry-card"><div class="telemetry-label">Signal Quality</div><div class="telemetry-value" id="telemetryPsnr">-- dB</div><div class="telemetry-sub">PSNR</div></div>
-    <div class="telemetry-card"><div class="telemetry-label">Cosine Match</div><div class="telemetry-value" id="telemetryCosine">--</div><div class="telemetry-sub">Before / cloaked</div></div>
+    <div class="telemetry-card"><div class="telemetry-label">Cosine Match</div><div class="telemetry-value" id="telemetryCosine">--</div><div class="telemetry-sub">Local image features</div></div>
   </div>
 
   <div class="grid">
@@ -554,20 +639,29 @@ HTML_PAGE = """<!DOCTYPE html>
         <button type="button" onclick="openWebcam()">Live Webcam Capture</button>
       </div>
       <dialog id="webcamDialog" style="max-width:620px;width:92vw;background:#07110d;color:#ecfdf5;border:1px solid #166534;border-radius:10px">
-        <div style="display:flex;justify-content:space-between;align-items:center"><b>Live Webcam Capture</b><button type="button" onclick="closeWebcam()" style="width:auto;margin:0;padding:7px 10px">Close</button></div>
-        <video id="webcamVideo" autoplay playsinline style="width:100%;height:360px;object-fit:contain;margin-top:10px;background:#020504"></video>
-        <button type="button" onclick="captureWebcam()">Capture Portrait</button>
+        <div style="display:flex;justify-content:space-between;align-items:center"><b>Live Webcam Capture</b><button type="button" onclick="closeWebcam()" style="width:auto;margin:0;padding:7px 10px">Cancel</button></div>
+        <div class="webcam-stage"><video id="webcamVideo" autoplay playsinline style="width:100%;height:360px;object-fit:contain;margin-top:10px;background:#020504"></video><div id="webcamCountdown" aria-live="assertive"></div></div>
+        <p class="webcam-hint">Capturing in 3 seconds, then the shield runs automatically.</p>
       </dialog>
-      <div class="img-box"><span class="placeholder" id="ph1">No photo selected</span><img id="origImg"></div>
-      <label>Perturbation Budget (Epsilon): <b id="epsVal" style="color:#38bdf8">0.025</b></label>
+      <div class="img-box" id="uploadPreview"><span class="placeholder" id="ph1">No photo selected</span><img id="origImg"></div>
+      <label>Perturbation Budget: <b id="epsVal" style="color:#38bdf8">0.025</b></label>
       <input type="range" id="eps" min="0.01" max="0.06" step="0.005" value="0.025" style="width:100%;accent-color:#06b6d4" oninput="epsVal.innerText=this.value">
       <label><input type="checkbox" id="jpegChk" checked style="accent-color:#06b6d4"> Simulate Social Media JPEG-75 Compression</label>
-      <button onclick="runCloak()">Protect Your Portrait Now</button>
+      <button id="protectButton" onclick="runCloak()">Protect Your Portrait Now</button>
+      <div id="cloakProgress" class="progress-panel" hidden aria-live="polite">
+        <div class="progress-heading"><span id="progressStatus">Preparing protection...</span><span id="progressPercent">Running</span></div>
+        <div class="progress-track" role="progressbar" aria-label="Shield processing progress"><div id="progressFill" class="progress-fill"></div></div>
+        <ol class="progress-steps">
+          <li>Detecting 5 Keypoints (KeypointRCNN)...</li>
+          <li>Optimizing EOT-PGD; tuning strength up to 0.060 if needed...</li>
+          <li>Verifying Cosine Similarity &amp; Stripping EXIF...</li>
+        </ol>
+      </div>
     </div>
 
     <div class="card">
-      <div class="card-title">2. Cloaked Image (Visually Unchanged)</div>
-      <div class="img-box split-box" id="splitBox"><span class="placeholder" id="ph2">Awaiting shield activation</span><img id="splitOriginal"><img id="cloakImg" class="split-cloaked"><div class="split-line" id="splitLine"></div><input class="split-control" id="splitControl" type="range" min="0" max="100" value="50" aria-label="Before and after image split"></div>
+      <div class="card-title">2. Cloaked Image (Before / After)</div>
+      <div class="img-box split-box" id="splitBox"><span class="placeholder" id="ph2">Awaiting shield activation</span><img id="splitOriginal"><img id="cloakImg"><span class="comparison-label before">ORIGINAL</span><span class="comparison-label after">CLOAKED</span><div class="split-line" id="splitLine"></div><input class="split-control" id="splitControl" type="range" min="0" max="100" value="50" aria-label="Compare original and cloaked image"></div>
       <div class="stat" id="auditBox">Upload a portrait and click <b>Activate Pixel Shield</b> to run live biometric attacker verification.</div>
       <div class="action-row">
         <a id="dlLink" class="dl-btn" download="cloaked_protected.png">Download PNG</a>
@@ -579,8 +673,8 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="card">
       <div class="card-title">3. 20x Amplified Biometric Noise Map</div>
       <div class="img-box"><span class="placeholder" id="ph3">Adversarial mask preview</span><img id="heatImg"></div>
-      <div class="stat">
-        <b style="color:#38bdf8">How Judges Can Verify:</b><br>
+      <div class="stat panel-caption">
+        <b style="color:#38bdf8">How You Can Verify:</b><br>
         • <b>Left vs. Middle:</b> Visually untouched (<code>SSIM &gt; 0.97</code>).<br>
         • <b>Right Panel:</b> Cyan shield locks onto detected facial landmarks (eyes, nose, jawline) while wiping hidden EXIF GPS tags.
       </div>
@@ -592,8 +686,9 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="scraper-grid">
       <div class="scraper-card"><div class="scraper-label">Original Image vs. Reference</div><div class="scraper-value" id="scraperOriginalTop">-- Identity Match</div></div>
       <div class="scraper-card"><div class="scraper-label">Cloaked / Compressed vs. Reference</div><div class="scraper-value" id="scraperCloakedTop">-- Identity Match</div></div>
-      <button type="button" class="stress-button" onclick="runStressTest()">Simulate WhatsApp / Instagram</button>
+      <button type="button" class="stress-button" onclick="runStressTest()">↻ Compress &amp; Re-Test (JPEG-75)</button>
     </div>
+    <div id="stressResult" class="stress-result" hidden role="status" aria-live="polite"></div>
   </div>
 
   <div id="scraperResults" style="display:none">
@@ -627,13 +722,60 @@ let exifData = null;
 let webcamStream = null;
 let originalDataUrl = null;
 let stressInProgress = false;
+let cloakInProgress = false;
+let cloakProgressTimer = null;
+let webcamCountdownTimer = null;
+let webcamCountdownActive = false;
+const progressSteps = Array.from(document.querySelectorAll("#cloakProgress .progress-steps li"));
+const cloakButton = document.getElementById("protectButton");
+function updateCloakProgress(step, complete = false, errorMessage = "") {
+  const progress = document.getElementById("cloakProgress");
+  progress.hidden = false;
+  progress.classList.toggle("complete", complete);
+  progress.classList.toggle("error", Boolean(errorMessage));
+  progressSteps.forEach((item, index) => {
+    item.classList.toggle("done", complete || index < step);
+    item.classList.toggle("active", !complete && !errorMessage && index === step);
+  });
+  document.getElementById("progressStatus").textContent =
+    errorMessage || (complete ? "Protection complete." : [
+      "Detecting 5 Keypoints (KeypointRCNN)...",
+      "Optimizing EOT-PGD Perturbations...",
+      "Verifying Cosine Similarity & Stripping EXIF..."
+    ][step]);
+  document.getElementById("progressPercent").textContent = complete ? "Complete" : errorMessage ? "Error" : "Processing";
+  document.getElementById("progressFill").parentElement.setAttribute("aria-valuenow", complete ? "100" : String(Math.min(90, 15 + step * 30)));
+}
+function clearCloakProgress() {
+  clearInterval(cloakProgressTimer);
+  cloakProgressTimer = null;
+  document.getElementById("cloakProgress").hidden = true;
+}
 function showLoadedImage(dataUrl) {
   imgDataUrl = dataUrl;
   origImg.src = dataUrl;
   splitOriginal.src = dataUrl;
+  splitBox.classList.remove("cloaked");
+  splitBox.style.setProperty("--split", splitControl.value + "%");
   originalDataUrl = dataUrl;
+  cloakImg.removeAttribute("src");
+  cloakImg.classList.remove("ready");
+  ph2.style.display = "none";
+  clearCloakProgress();
+  verificationData = null;
+  exifData = null;
+  dlLink.style.display = "none";
+  stressResult.hidden = true;
+  stressResult.classList.remove("error");
+  stressResult.classList.remove("review");
+  ph3.style.display = "block";
+  auditBox.textContent = "Image loaded. Activate the shield to generate the cloaked result.";
   ph1.style.display = "none";
 }
+splitControl.oninput = () => {
+  splitBox.style.setProperty("--split", splitControl.value + "%");
+  splitLine.style.left = splitControl.value + "%";
+};
 async function loadSample(name) {
   const response = await fetch(`/sample/${name}`);
   if (!response.ok) return alert("The sample photo could not be loaded.");
@@ -646,71 +788,105 @@ fileIn.onchange = e => {
 };
 async function runCloak() {
   if (!imgDataUrl) return alert("Please upload a portrait photo first!");
-  auditBox.innerHTML = "Detecting facial landmarks & running adversarial optimization...";
-  let res;
+  if (cloakInProgress) return;
+  cloakInProgress = true;
+  const requestedEpsilon = parseFloat(eps.value);
+  splitBox.classList.remove("cloaked");
+  cloakImg.removeAttribute("src");
+  cloakImg.classList.remove("ready");
+  clearInterval(cloakProgressTimer);
+  updateCloakProgress(0);
+  cloakProgressTimer = setInterval(() => {
+    const activeStep = progressSteps.findIndex(item => item.classList.contains("active"));
+    updateCloakProgress(Math.min(2, activeStep + 1));
+  }, 4500);
+  cloakButton.disabled = true;
   try {
-    res = await fetch("/cloak", {
+    const res = await fetch("/cloak", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ image: imgDataUrl, epsilon: parseFloat(eps.value), jpeg: jpegChk.checked })
+      body: JSON.stringify({ image: imgDataUrl, epsilon: requestedEpsilon, jpeg: jpegChk.checked })
     });
-  } catch (error) {
-    auditBox.textContent = "Could not reach the local shield server. Check that app.py is running and retry.";
-    return;
-  }
-  let d;
-  try {
-    d = await res.json();
-  } catch (error) {
-    auditBox.textContent = "The local server returned an unreadable response. Retry the request.";
-    return;
-  }
-  if (!res.ok) {
-    auditBox.textContent = d.error || "The image could not be processed. Try another image.";
-    return;
-  }
-  cloakImg.src = d.cloaked; ph2.style.display = "none";
-  heatImg.src = d.heatmap;  ph3.style.display = "none";
-  dlLink.href = d.cloaked;
-  dlLink.style.display = "block";
-  telemetryTime.innerText = d.ms + " ms";
-  telemetrySsim.innerText = d.ssim + " SSIM";
-  telemetryPsnr.innerText = d.psnr + " dB";
-  telemetryCosine.innerText = d.cosine_similarity.toFixed(3) + " → " + d.cloaked_cosine_similarity.toFixed(3);
-  scraperOriginal.innerHTML = `<span class="bad">${d.orig_match}% Identity Match</span> — Vulnerable`;
-  scraperCloaked.innerHTML = `<span class="good">${d.cloak_match}% Identity Match</span> — Scraper Defeated`;
-  scraperOriginalTop.innerHTML = `<span class="bad">${d.orig_match}% Identity Match</span> — Vulnerable`;
-  scraperCloakedTop.innerHTML = `<span class="good">${d.cloak_match}% Identity Match</span> — Scraper Defeated`;
-  verificationData = d.detector;
-  exifData = d.exif_diff;
-  if (verificationData) {
-    verifyOriginal.src = verificationData.original;
-    verifyCloaked.src = verificationData.cloaked;
-    verifyStats.innerHTML = `Original faces: <b class="good">${verificationData.original_faces}</b> | Cloaked faces: <b class="good">${verificationData.cloaked_faces}</b> | Local cosine similarity: <b>${d.cosine_similarity.toFixed(3)}</b> → <b>${d.cloaked_cosine_similarity.toFixed(3)}</b>`;
-  }
-  auditBox.innerHTML = `
-    <b>Defense Status:</b> <span class="good">${d.status}</span><br>
-    <b>Facial Landmarks Locked:</b> ${d.landmarks} keypoints<br>
-    <div class="confidence">
-      <b>Cosine Similarity:</b> ${d.cosine_similarity.toFixed(3)} → ${d.cloaked_cosine_similarity.toFixed(3)} (${d.cosine_similarity > d.cloaked_cosine_similarity ? "Match Broken" : "Review Required"})<br>
-      <div class="confidence-row">
-        <div class="confidence-label"><span>Uncloaked Scraper</span><b class="bad">${d.orig_match}% — Identity Exposed</b></div>
-        <div class="confidence-track"><div class="confidence-bar red" data-width="${d.orig_match}%"></div></div>
-      </div>
-      <div class="confidence-row">
-        <div class="confidence-label"><span>Cloaked Scraper</span><b class="good">${d.cloak_match}% — Scraper Blinded</b></div>
-        <div class="confidence-track"><div class="confidence-bar green" data-width="${d.cloak_match}%"></div></div>
-      </div>
-    </div>
-    <b>Visual Fidelity (SSIM):</b> <b>${d.ssim}</b><br>
-    <b>EXIF Metadata:</b> ${d.exif}<br>
-    <b>Inference Time:</b> ${d.ms} ms (PyTorch KeypointRCNN + EOT-PGD)
-  `;
-  requestAnimationFrame(() => {
-    document.querySelectorAll(".confidence-bar").forEach(bar => {
-      bar.style.width = bar.dataset.width;
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || "The image could not be processed. Try another image.");
+    ph2.textContent = "Loading cloaked image preview...";
+    ph2.style.display = "block";
+    await new Promise((resolve, reject) => {
+      const cleanUp = () => {
+        cloakImg.removeEventListener("load", onLoad);
+        cloakImg.removeEventListener("error", onError);
+      };
+      const onLoad = () => { cleanUp(); resolve(); };
+      const onError = () => { cleanUp(); reject(new Error("Protection completed, but the cloaked preview could not be displayed.")); };
+      cloakImg.addEventListener("load", onLoad, {once:true});
+      cloakImg.addEventListener("error", onError, {once:true});
+      cloakImg.src = d.cloaked;
+      if (cloakImg.complete && cloakImg.naturalWidth > 0) onLoad();
     });
-  });
+    cloakImg.classList.add("ready");
+    splitBox.classList.add("cloaked");
+    splitControl.value = "50";
+    splitBox.style.setProperty("--split", "50%");
+    splitLine.style.left = "50%";
+    ph2.style.display = "none";
+    heatImg.src = d.heatmap;
+    ph3.style.display = "none";
+    dlLink.href = d.cloaked;
+    dlLink.style.display = "block";
+    telemetryTime.innerText = d.ms + " ms";
+    telemetrySsim.innerText = d.ssim + " SSIM";
+    telemetryPsnr.innerText = d.psnr + " dB";
+    telemetryCosine.innerText = d.cosine_similarity.toFixed(3) + " → " + d.cloaked_cosine_similarity.toFixed(3);
+    const cloakMatchClass = d.cloaked_cosine_similarity < 0.30 ? "good" : "warn";
+    scraperOriginal.innerHTML = `<span class="bad">${d.orig_match}% Identity Match</span> — Vulnerable`;
+    scraperCloaked.innerHTML = `<span class="${cloakMatchClass}">${d.cloak_match}% Identity Match</span> — ${d.status}`;
+    scraperOriginalTop.innerHTML = `<span class="bad">${d.orig_match}% Identity Match</span> — Vulnerable`;
+    scraperCloakedTop.innerHTML = `<span class="${cloakMatchClass}">${d.cloak_match}% Identity Match</span> — ${d.status}`;
+    verificationData = d.detector;
+    exifData = d.exif_diff;
+    stressResult.hidden = true;
+    if (verificationData) {
+      verifyOriginal.src = verificationData.original;
+      verifyCloaked.src = verificationData.cloaked;
+      verifyStats.innerHTML = `Original faces: <b class="good">${verificationData.original_faces}</b> | Cloaked faces: <b class="good">${verificationData.cloaked_faces}</b> | Local similarity: <b>${d.cosine_similarity.toFixed(3)}</b> → <b>${d.cloaked_cosine_similarity.toFixed(3)}</b>`;
+    }
+    auditBox.innerHTML = `
+      <b>Defense Status:</b> <span class="${cloakMatchClass}">${d.status}</span><br>
+      <b>Facial Landmarks Locked:</b> ${d.landmarks} keypoints<br>
+      <div class="confidence">
+        <b>Local cosine similarity:</b> ${d.cosine_similarity.toFixed(3)} → ${d.cloaked_cosine_similarity.toFixed(3)}
+        <small class="cosine-note">Feature similarity is measured with a local ResNet18 image model; it is not a dedicated face-recognition benchmark and does not guarantee protection from other systems.</small>
+        <div class="confidence-row">
+          <div class="confidence-label"><span>Original image</span><b class="bad">${d.orig_match}% — Identity Exposed</b></div>
+          <div class="confidence-track"><div class="confidence-bar red" data-width="${d.orig_match}%"></div></div>
+        </div>
+        <div class="confidence-row">
+          <div class="confidence-label"><span>Cloaked image</span><b class="${cloakMatchClass}">${d.cloak_match}% — ${d.cloaked_cosine_similarity < 0.30 ? "Scraper Blinded" : "Review Required"}</b></div>
+          <div class="confidence-track"><div class="confidence-bar ${d.cloaked_cosine_similarity < 0.30 ? "green" : "red"}" data-width="${d.cloak_match}%"></div></div>
+        </div>
+      </div>
+      <b>Visual Fidelity (SSIM):</b> <b>${d.ssim}</b><br>
+      <b>EXIF Metadata:</b> ${d.exif}<br>
+      <b>Inference Time:</b> ${d.ms} ms
+    `;
+    requestAnimationFrame(() => {
+      document.querySelectorAll(".confidence-bar").forEach(bar => {
+        bar.style.width = bar.dataset.width;
+      });
+    });
+    updateCloakProgress(2, true);
+  } catch (error) {
+    const message = error.message || "Protection failed. Please retry.";
+    auditBox.textContent = message;
+    ph2.textContent = message;
+    ph2.style.display = cloakImg.hasAttribute("src") ? "block" : "none";
+    updateCloakProgress(0, false, message);
+  } finally {
+    clearInterval(cloakProgressTimer);
+    cloakProgressTimer = null;
+    cloakButton.disabled = false;
+    cloakInProgress = false;
+  }
 }
 function openVerification() {
   if (!verificationData) return alert("Run the shield first.");
@@ -722,46 +898,107 @@ async function openWebcam() {
   try {
     webcamStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:false});
     webcamVideo.srcObject = webcamStream;
+    await webcamVideo.play();
     webcamDialog.showModal();
-  } catch (error) { alert("Could not access the webcam. Allow camera permission and retry."); }
+    startWebcamCountdown();
+  } catch (error) {
+    if (webcamStream) webcamStream.getTracks().forEach(track => track.stop());
+    webcamStream = null;
+    alert(error.message || "Could not access the webcam. Allow camera permission and retry.");
+  }
+}
+function startWebcamCountdown() {
+  clearTimeout(webcamCountdownTimer);
+  webcamCountdownActive = true;
+  const countdown = document.getElementById("webcamCountdown");
+  countdown.classList.add("active");
+  let remaining = 3;
+  const tick = () => {
+    if (!webcamCountdownActive) return;
+    if (remaining === 0) {
+      countdown.textContent = "Capturing";
+      webcamCountdownTimer = setTimeout(captureWebcam, 350);
+      return;
+    }
+    countdown.textContent = String(remaining);
+    remaining -= 1;
+    webcamCountdownTimer = setTimeout(tick, 1000);
+  };
+  tick();
 }
 function closeWebcam() {
+  webcamCountdownActive = false;
+  clearTimeout(webcamCountdownTimer);
+  webcamCountdownTimer = null;
+  document.getElementById("webcamCountdown").classList.remove("active");
   if (webcamStream) webcamStream.getTracks().forEach(track => track.stop());
   webcamStream = null;
-  webcamDialog.close();
+  if (webcamDialog.open) webcamDialog.close();
 }
-function captureWebcam() {
+async function captureWebcam() {
+  if (!webcamStream || !webcamVideo.videoWidth || !webcamVideo.videoHeight) {
+    closeWebcam();
+    alert("The webcam did not provide a frame. Please try again.");
+    return;
+  }
   const canvas=document.createElement('canvas');
   canvas.width=webcamVideo.videoWidth; canvas.height=webcamVideo.videoHeight;
-  canvas.getContext('2d').drawImage(webcamVideo,0,0);
+  const context = canvas.getContext('2d');
+  if (!context) {
+    closeWebcam();
+    alert("Could not capture a webcam frame in this browser.");
+    return;
+  }
+  context.drawImage(webcamVideo,0,0);
   showLoadedImage(canvas.toDataURL('image/jpeg',0.92));
   closeWebcam();
+  await runCloak();
 }
-splitControl.oninput = () => {
-  splitBox.style.setProperty('--split', splitControl.value + '%');
-  splitLine.style.left = splitControl.value + '%';
-};
 async function runStressTest() {
-  if (!verificationData || !originalDataUrl || !cloakImg.src) return alert("Run the shield first.");
+  if (!verificationData || !originalDataUrl || !cloakImg.classList.contains("ready")) {
+    stressResult.hidden = false;
+    stressResult.classList.add("error");
+    stressResult.textContent = "Run the shield before testing compression.";
+    return;
+  }
   if (stressInProgress) return;
   stressInProgress=true;
   const button=document.querySelector('.stress-button');
-  button.textContent='Running Compression...';
-  const cloakedUrl=cloakImg.src;
+  button.disabled = true;
+  button.textContent='⏳ Testing JPEG-75...';
+  stressResult.hidden = false;
+  stressResult.classList.remove("error");
+  stressResult.classList.remove("review");
+  stressResult.textContent = "Compressing the cloaked portrait and re-checking its identity match...";
+  let bitmap = null;
   try {
-    const source=await fetch(cloakedUrl).then(r=>r.blob());
-    const bitmap=await createImageBitmap(source);
+    const source=await fetch(cloakImg.src).then(r=>r.blob());
+    bitmap=await createImageBitmap(source);
     const canvas=document.createElement('canvas');
-    canvas.width=Math.round(bitmap.width*0.9); canvas.height=Math.round(bitmap.height*0.9);
-    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
-    const stressUrl=canvas.toDataURL('image/jpeg',0.65);
+    canvas.width=Math.max(1,Math.round(bitmap.width*0.9)); canvas.height=Math.max(1,Math.round(bitmap.height*0.9));
+    const context=canvas.getContext('2d');
+    if (!context) throw new Error("Could not prepare the compressed image in this browser.");
+    context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+    const stressUrl=canvas.toDataURL('image/jpeg',0.75);
     const res=await fetch('/stress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({original:originalDataUrl,cloaked:stressUrl})});
     const d=await res.json();
     if (!res.ok) throw new Error(d.error||'Stress test failed');
-    scraperCloakedTop.innerHTML=`<span class="good">${d.stress_match}% Identity Match</span> — After 65% JPEG`;
-    if (typeof scraperCloaked !== "undefined") scraperCloaked.innerHTML=`<span class="good">${d.stress_match}% Identity Match</span> — After 65% JPEG`;
-  } catch (error) { alert(error.message||'Stress test failed'); }
-  stressInProgress=false; button.textContent='Simulate WhatsApp / Instagram';
+    const stillProtected = d.stress_match < 30;
+    const protectionStatus = stillProtected ? "Still Protected" : "Protection Needs Review";
+    const matchClass = stillProtected ? "good" : "warn";
+    scraperCloakedTop.innerHTML=`<span class="${matchClass}">${d.stress_match}% Identity Match</span> — After JPEG-75`;
+    if (typeof scraperCloaked !== "undefined") scraperCloaked.innerHTML=`<span class="${matchClass}">${d.stress_match}% Identity Match</span> — After JPEG-75`;
+    stressResult.classList.toggle("review", !stillProtected);
+    stressResult.textContent=`Post-WhatsApp Compression Match: ${d.stress_match}% — ${protectionStatus}`;
+  } catch (error) {
+    stressResult.classList.add("error");
+    stressResult.textContent=error.message||'Compression test failed. Please retry.';
+  } finally {
+    if (bitmap) bitmap.close();
+    stressInProgress=false;
+    button.disabled = false;
+    button.textContent='↻ Compress & Re-Test (JPEG-75)';
+  }
 }
 function openExif() {
   if (!exifData) return alert("Run the shield first.");
@@ -811,12 +1048,17 @@ class Handler(BaseHTTPRequestHandler):
                 cloaked_pil, _, _ = parse_cloak_request(json.dumps({"image": payload["cloaked"], "epsilon": 0.025, "jpeg": True}).encode())
                 original_rgb = np.array(ImageOps.exif_transpose(original_pil).convert("RGB"))
                 cloaked_rgb = np.array(ImageOps.exif_transpose(cloaked_pil).convert("RGB"))
-                box, _ = detect_facial_landmarks(original_rgb)
-                original_embedding = extract_embedding(original_rgb, box)
-                stressed_embedding = extract_embedding(cloaked_rgb, box)
-                stress_cosine = float(np.clip(np.dot(original_embedding, stressed_embedding), -1.0, 1.0))
-                stress_match = round(max(0.0, min(100.0, stress_cosine * 100.0)), 1)
-                self.send_json(200, {"stress_match": stress_match, "stress_cosine": stress_cosine})
+                original_box, original_landmarks = detect_facial_landmarks(original_rgb)
+                stress_cosine, stress_match = measure_compressed_match(
+                    original_rgb,
+                    cloaked_rgb,
+                    original_box,
+                )
+                self.send_json(200, {
+                    "stress_match": stress_match,
+                    "stress_cosine": stress_cosine,
+                    "landmarks": len(original_landmarks),
+                })
             except Exception as exc:
                 self.send_json(400, {"error": str(exc) or "Could not run the compression stress test."})
             return
@@ -852,7 +1094,14 @@ class Handler(BaseHTTPRequestHandler):
             exif_status = inspect_exif(pil_img)
             exif_diff = get_exif_diff(pil_img)
             orig_rgb = np.array(ImageOps.exif_transpose(pil_img).convert("RGB"))
-            cloaked_rgb, box, landmarks = apply_cloak(orig_rgb, epsilon=epsilon)
+            detection = detect_facial_landmarks(orig_rgb)
+            box, landmarks = detection
+            ref_emb = extract_embedding(orig_rgb, box)
+            cloaked_rgb, _, _ = apply_cloak(
+                orig_rgb,
+                epsilon=epsilon,
+                detection=detection,
+            )
             audited_rgb = jpeg_roundtrip(cloaked_rgb, 75) if test_jpeg else cloaked_rgb
             ssim_val = compute_ssim(orig_rgb, cloaked_rgb)
             psnr_val = compute_psnr(orig_rgb, cloaked_rgb)
@@ -871,7 +1120,6 @@ class Handler(BaseHTTPRequestHandler):
                 cv2.line(heatmap, (lx, ly - 15), (lx, ly - 7), (56, 189, 248), 1)
                 cv2.line(heatmap, (lx, ly + 7), (lx, ly + 15), (56, 189, 248), 1)
 
-            ref_emb = extract_embedding(orig_rgb, box)
             jpeg_embedding = extract_embedding(jpeg_roundtrip(orig_rgb, 85), box)
             cloaked_embedding = extract_embedding(audited_rgb, box)
             cosine_similarity = float(np.clip(np.dot(ref_emb, jpeg_embedding), -1.0, 1.0))

@@ -10,10 +10,10 @@ The application remains 100% local: it uses PyTorch, torchvision KeypointRCNN an
 
 ## Technical Highlights
 
-- Landmark-guided projected gradient descent on a local biometric surrogate
-- 384px landmark scaling and 3-step PGD for fast demonstration runs
-- Resize/noise expectation-over-transformation simulation for compression robustness
-- Real cosine-similarity comparison between original and cloaked embeddings
+- Landmark-guided projected gradient descent using the selected perturbation strength
+- 320px landmark scaling and 12-step EOT-PGD for demonstration runs
+- Resize/noise expectation-over-transformation simulation during perturbation optimization
+- Local image-feature cosine comparison before and after JPEG-75 compression
 - SSIM visual-fidelity audit
 - Local OpenCV/Keypoint face-detector verification
 - EXIF metadata audit and downloadable stripped-tag report
@@ -21,7 +21,7 @@ The application remains 100% local: it uses PyTorch, torchvision KeypointRCNN an
 
 ## Demo Claim
 
-Say “CloakPixel adds invisible, face-region perturbations that disrupt automated embedding extraction while preserving human-visible image quality.” Use measured cosine, SSIM, and detector values as the evidence for each test image. Avoid claiming universal resistance against every future recognition or generative-AI model.
+Describe CloakPixel as a local privacy experiment that applies face-region perturbations and reports local image-feature cosine similarity, SSIM, and detector results for each image. Its ResNet18 image-feature model is not a dedicated face-recognition benchmark, and measured similarity does not guarantee resistance to other recognition systems. Treat a high post-compression match as a warning.
 
 ## Run
 
